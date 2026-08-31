@@ -13,18 +13,35 @@ spec:
       labels:
         app: mysql
     spec:
+      serviceAccountName: mysql
+
       containers:
         - name: mysql
           image: mysql:8.0
+
           ports:
             - containerPort: 3306
+
           env:
-            - name: MYSQL_ROOT_PASSWORD
-              value: "CHANGE_ME"
+            - name: MYSQL_ROOT_PASSWORD_FILE
+              value: /mnt/secrets-store/mysql-root-password
+
           volumeMounts:
+            - name: mysql-secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+
             - name: mysql-storage
               mountPath: /var/lib/mysql
+
       volumes:
+        - name: mysql-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: mysql-secrets
+
         - name: mysql-storage
           persistentVolumeClaim:
             claimName: mysql-pvc
