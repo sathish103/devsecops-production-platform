@@ -28,12 +28,17 @@ spec:
           image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-user-service:0fecf2b8d41851f9636a0ce5612fe820d17515f3
 
           command:
-            - java
+            - /bin/sh
+            - -c
 
           args:
-            - "-javaagent:/otel/opentelemetry-javaagent.jar"
-            - "-jar"
-            - "/app/app.jar"
+            - |
+              export DB_USERNAME="$(cat /mnt/secrets-store/mysql-username)"
+              export DB_PASSWORD="$(cat /mnt/secrets-store/mysql-password)"
+              exec java \
+                -javaagent:/otel/opentelemetry-javaagent.jar \
+                -jar \
+                /app/app.jar
 
           ports:
             - containerPort: 8081
@@ -73,19 +78,7 @@ spec:
             - name: DB_NAME
               value: userdb
 
-            - name: DB_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: devsecops-mysql
-                  key: username
-
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: devsecops-mysql
-                  key: password
-
-            # OpenTelemetry
+            # OpenTelemetry — unchanged
             - name: OTEL_SERVICE_NAME
               value: user-service
 
