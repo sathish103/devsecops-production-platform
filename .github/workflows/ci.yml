@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 124666675720.dkr.ecr.ap-south-1.amazonaws.com
+
+jobs:
+
+  gitleaks:
+    name: Secret Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  maven-build:
+    name: Maven Build and Test
+    runs-on: ubuntu-latest
+    needs: gitleaks
+
+    strategy:
+      fail-fast: true
+      matrix:
+        service:
+          - user-service
+          - product-service
+          - order-service
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Build and Test
+        working-directory: ${{ matrix.service }}
+        run: mvn clean package
+
+  docker-build-scan-push:
+    name: Docker Build, Scan and Push
+    runs-on: ubuntu-latest
+    needs: maven-build
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::124666675720:role/GitHubActions-DevSecOps-Production
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        run: aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Build User Service
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/devsecops-user-service:$IMAGE_TAG \
+            ./user-service
+
+      - name: Build Product Service
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/devsecops-product-service:$IMAGE_TAG \
+            ./product-service
+
+      - name: Build Order Service
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/devsecops-order-service:$IMAGE_TAG \
+            ./order-service
+
+      - name: Build Frontend
+        run: |
+          docker build \
+            -t $ECR_REGISTRY/devsecops-frontend:$IMAGE_TAG \
+            ./frontend
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+
+      - name: Scan User Service
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            $ECR_REGISTRY/devsecops-user-service:$IMAGE_TAG
+
+      - name: Scan Product Service
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            $ECR_REGISTRY/devsecops-product-service:$IMAGE_TAG
+
+      - name: Scan Order Service
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            $ECR_REGISTRY/devsecops-order-service:$IMAGE_TAG
+
+      - name: Scan Frontend
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            $ECR_REGISTRY/devsecops-frontend:$IMAGE_TAG
+
+      - name: Push User Service
+        run: |
+          docker push \
+            $ECR_REGISTRY/devsecops-user-service:$IMAGE_TAG
+
+      - name: Push Product Service
+        run: |
+          docker push \
+            $ECR_REGISTRY/devsecops-product-service:$IMAGE_TAG
+
+      - name: Push Order Service
+        run: |
+          docker push \
+            $ECR_REGISTRY/devsecops-order-service:$IMAGE_TAG
+
+      - name: Push Frontend
+        run: |
+          docker push \
+            $ECR_REGISTRY/devsecops-frontend:$IMAGE_TAG
+
+      - name: CI Summary
+        run: |
+          echo "========================================"
+          echo "CI PIPELINE SUCCESS"
+          echo "========================================"
+          echo "Commit: $GITHUB_SHA"
+          echo "Images pushed:"
+          echo "$ECR_REGISTRY/devsecops-user-service:$IMAGE_TAG"
+          echo "$ECR_REGISTRY/devsecops-product-service:$IMAGE_TAG"
+          echo "$ECR_REGISTRY/devsecops-order-service:$IMAGE_TAG"
+          echo "$ECR_REGISTRY/devsecops-frontend:$IMAGE_TAG"
