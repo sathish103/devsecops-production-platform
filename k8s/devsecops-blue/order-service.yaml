@@ -20,16 +20,25 @@ spec:
         app: order-service-blue
 
     spec:
+      serviceAccountName: devsecops-app
+
       containers:
         - name: order-service
+
           image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-order-service:0fecf2b8d41851f9636a0ce5612fe820d17515f3
 
           command:
-            - java
+            - /bin/sh
+            - -c
+
           args:
-            - "-javaagent:/otel/opentelemetry-javaagent.jar"
-            - "-jar"
-            - "/app/app.jar"
+            - |
+              export DB_USERNAME="$(cat /mnt/secrets-store/mysql-username)"
+              export DB_PASSWORD="$(cat /mnt/secrets-store/mysql-password)"
+              exec java \
+                -javaagent:/otel/opentelemetry-javaagent.jar \
+                -jar \
+                /app/app.jar
 
           ports:
             - containerPort: 8083
@@ -59,6 +68,17 @@ spec:
             failureThreshold: 3
 
           env:
+            # MySQL connection
+            - name: DB_HOST
+              value: mysql.database.svc.cluster.local
+
+            - name: DB_PORT
+              value: "3306"
+
+            - name: DB_NAME
+              value: orderdb
+
+            # OpenTelemetry — unchanged
             - name: OTEL_SERVICE_NAME
               value: order-service
 
@@ -77,11 +97,22 @@ spec:
             - name: OTEL_LOGS_EXPORTER
               value: none
 
+            # Product service
             - name: PRODUCT_SERVICE_URL
               value: http://product-service-blue.devsecops-blue.svc.cluster.local:8082
 
-            # AWS Secrets Manager integration will replace
-            # Kubernetes Secret references in the next step.
+          volumeMounts:
+            - name: mysql-secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+
+      volumes:
+        - name: mysql-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: devsecops-mysql-secrets
 
 ---
 apiVersion: v1
