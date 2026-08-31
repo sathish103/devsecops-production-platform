@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service-blue
+  namespace: devsecops-blue
+
+spec:
+  replicas: 1
+
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app: user-service-blue
+
+  template:
+    metadata:
+      labels:
+        app: user-service-blue
+
+    spec:
+      containers:
+        - name: user-service
+          image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-user-service
+
+          command:
+            - java
+          args:
+            - "-javaagent:/otel/opentelemetry-javaagent.jar"
+            - "-jar"
+            - "/app/app.jar"
+
+          ports:
+            - containerPort: 8081
+
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8081
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: user-service
+
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://tempo.tempo.svc.cluster.local:4318
+
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: http/protobuf
+
+            - name: OTEL_TRACES_EXPORTER
+              value: otlp
+
+            - name: OTEL_METRICS_EXPORTER
+              value: none
+
+            - name: OTEL_LOGS_EXPORTER
+              value: none
+
+            # AWS Secrets Manager integration will replace these
+            # Kubernetes Secret references in the next step.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service-blue
+  namespace: devsecops-blue
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: user-service-blue
+
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081

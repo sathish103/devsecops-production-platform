@@ -1,0 +1,956 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devsecops-blue
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devsecops-green
+---
+allowVolumeExpansion: true
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+parameters:
+  encrypted: "true"
+  fsType: ext4
+  type: gp3
+provisioner: ebs.csi.aws.com
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-blue
+  namespace: devsecops-blue
+spec:
+  ports:
+  - port: 80
+    targetPort: 80
+  selector:
+    app: frontend
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service-blue
+  namespace: devsecops-blue
+spec:
+  ports:
+  - name: http
+    port: 8083
+    targetPort: 8083
+  selector:
+    app: order-service-blue
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-service-blue
+  namespace: devsecops-blue
+spec:
+  ports:
+  - name: http
+    port: 8082
+    targetPort: 8082
+  selector:
+    app: product-service-blue
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service-blue
+  namespace: devsecops-blue
+spec:
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+  selector:
+    app: user-service-blue
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-green
+  namespace: devsecops-green
+spec:
+  ports:
+  - port: 80
+    targetPort: 80
+  selector:
+    app: frontend
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service-green
+  namespace: devsecops-green
+spec:
+  ports:
+  - name: http
+    port: 8083
+    targetPort: 8083
+  selector:
+    app: order-service-green
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: product-service-green
+  namespace: devsecops-green
+spec:
+  ports:
+  - name: http
+    port: 8082
+    targetPort: 8082
+  selector:
+    app: product-service-green
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service-green
+  namespace: devsecops-green
+spec:
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+  selector:
+    app: user-service-green
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-blue
+  namespace: devsecops-blue
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend-blue
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: frontend-blue
+    spec:
+      containers:
+      - image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-frontend:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: frontend
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service-blue
+  namespace: devsecops-blue
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service-blue
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: order-service-blue
+    spec:
+      containers:
+      - args:
+        - -javaagent:/otel/opentelemetry-javaagent.jar
+        - -jar
+        - /app/app.jar
+        command:
+        - java
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: order-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://tempo.tempo.svc.cluster.local:4318
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: http/protobuf
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: PRODUCT_SERVICE_URL
+          value: http://product-service-blue.devsecops-blue.svc.cluster.local:8082
+        image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-order-service:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8083
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: order-service
+        ports:
+        - containerPort: 8083
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8083
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          failureThreshold: 12
+          httpGet:
+            path: /actuator/health
+            port: 8083
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service-blue
+  namespace: devsecops-blue
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: product-service-blue
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: product-service-blue
+    spec:
+      containers:
+      - args:
+        - -javaagent:/otel/opentelemetry-javaagent.jar
+        - -jar
+        - /app/app.jar
+        command:
+        - java
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: product-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://tempo.tempo.svc.cluster.local:4318
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: http/protobuf
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-product-service:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8082
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: product-service
+        ports:
+        - containerPort: 8082
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8082
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          failureThreshold: 12
+          httpGet:
+            path: /actuator/health
+            port: 8082
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service-blue
+  namespace: devsecops-blue
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-service-blue
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: user-service-blue
+    spec:
+      containers:
+      - args:
+        - -javaagent:/otel/opentelemetry-javaagent.jar
+        - -jar
+        - /app/app.jar
+        command:
+        - java
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: user-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://tempo.tempo.svc.cluster.local:4318
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: http/protobuf
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-user-service:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8081
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: user-service
+        ports:
+        - containerPort: 8081
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8081
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          failureThreshold: 12
+          httpGet:
+            path: /actuator/health
+            port: 8081
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-green
+  namespace: devsecops-green
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend-green
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: frontend-green
+    spec:
+      containers:
+      - image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-frontend:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: frontend
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service-green
+  namespace: devsecops-green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service-green
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: order-service-green
+    spec:
+      containers:
+      - args:
+        - -javaagent:/otel/opentelemetry-javaagent.jar
+        - -jar
+        - /app/app.jar
+        command:
+        - java
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: order-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://tempo.tempo.svc.cluster.local:4318
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: http/protobuf
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        - name: PRODUCT_SERVICE_URL
+          value: http://product-service-green.devsecops-green.svc.cluster.local:8082
+        image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-order-service:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8083
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: order-service
+        ports:
+        - containerPort: 8083
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8083
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          failureThreshold: 12
+          httpGet:
+            path: /actuator/health
+            port: 8083
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service-green
+  namespace: devsecops-green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: product-service-green
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: product-service-green
+    spec:
+      containers:
+      - args:
+        - -javaagent:/otel/opentelemetry-javaagent.jar
+        - -jar
+        - /app/app.jar
+        command:
+        - java
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: product-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://tempo.tempo.svc.cluster.local:4318
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: http/protobuf
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-product-service:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8082
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: product-service
+        ports:
+        - containerPort: 8082
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8082
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          failureThreshold: 12
+          httpGet:
+            path: /actuator/health
+            port: 8082
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service-green
+  namespace: devsecops-green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-service-green
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: user-service-green
+    spec:
+      containers:
+      - args:
+        - -javaagent:/otel/opentelemetry-javaagent.jar
+        - -jar
+        - /app/app.jar
+        command:
+        - java
+        env:
+        - name: OTEL_SERVICE_NAME
+          value: user-service
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://tempo.tempo.svc.cluster.local:4318
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: http/protobuf
+        - name: OTEL_TRACES_EXPORTER
+          value: otlp
+        - name: OTEL_METRICS_EXPORTER
+          value: none
+        - name: OTEL_LOGS_EXPORTER
+          value: none
+        image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-user-service:11
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8081
+          periodSeconds: 20
+          timeoutSeconds: 5
+        name: user-service
+        ports:
+        - containerPort: 8081
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8081
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          failureThreshold: 12
+          httpGet:
+            path: /actuator/health
+            port: 8081
+          periodSeconds: 10
+          timeoutSeconds: 5
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: LoadBalancerConfiguration
+metadata:
+  name: devsecops-alb-config
+  namespace: devsecops
+spec:
+  listenerConfigurations:
+  - defaultCertificate: arn:aws:acm:ap-south-1:124666675720:certificate/9197e520-ad97-4525-a8e1-e5080148db36
+    protocolPort: HTTPS:443
+  scheme: internet-facing
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: frontend-tg
+  namespace: devsecops
+spec:
+  defaultConfiguration:
+    healthCheckConfig:
+      healthCheckPath: /
+      healthCheckPort: "80"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: 200-399
+    targetType: ip
+  targetReference:
+    name: frontend-service
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: order-tg
+  namespace: devsecops
+spec:
+  defaultConfiguration:
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8083"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: 200-399
+    targetType: ip
+  targetReference:
+    name: order-service
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: product-tg
+  namespace: devsecops
+spec:
+  defaultConfiguration:
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8082"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: 200-399
+    targetType: ip
+  targetReference:
+    name: product-service
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: user-tg
+  namespace: devsecops
+spec:
+  defaultConfiguration:
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8081"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: 200-399
+    targetType: ip
+  targetReference:
+    name: user-service
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: devsecops-gateway
+  namespace: devsecops
+spec:
+  gatewayClassName: aws-alb
+  infrastructure:
+    parametersRef:
+      group: gateway.k8s.aws
+      kind: LoadBalancerConfiguration
+      name: devsecops-alb-config
+  listeners:
+  - allowedRoutes:
+      namespaces:
+        from: Same
+    name: http
+    port: 80
+    protocol: HTTP
+  - allowedRoutes:
+      namespaces:
+        from: Same
+    name: https
+    port: 443
+    protocol: HTTPS
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: aws-alb
+spec:
+  controllerName: gateway.k8s.aws/alb
+  description: AWS ALB GatewayClass
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: frontend-route
+  namespace: devsecops
+spec:
+  parentRefs:
+  - name: devsecops-gateway
+  rules:
+  - backendRefs:
+    - name: frontend-service
+      port: 80
+    matches:
+    - path:
+        type: PathPrefix
+        value: /
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: order-route
+  namespace: devsecops
+spec:
+  parentRefs:
+  - name: devsecops-gateway
+  rules:
+  - backendRefs:
+    - name: order-service
+      port: 8083
+    matches:
+    - path:
+        type: PathPrefix
+        value: /api/orders
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: product-route
+  namespace: devsecops
+spec:
+  parentRefs:
+  - name: devsecops-gateway
+  rules:
+  - backendRefs:
+    - name: product-service
+      port: 8082
+    matches:
+    - path:
+        type: PathPrefix
+        value: /api/products
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: user-route
+  namespace: devsecops
+spec:
+  parentRefs:
+  - name: devsecops-gateway
+  rules:
+  - backendRefs:
+    - name: user-service
+      port: 8081
+    matches:
+    - path:
+        type: PathPrefix
+        value: /api/auth
+    - path:
+        type: PathPrefix
+        value: /api/users
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-devsecops-routes
+  namespace: devsecops-blue
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    namespace: devsecops
+  to:
+  - group: ""
+    kind: Service
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-devsecops-routes
+  namespace: devsecops-green
+spec:
+  from:
+  - group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    namespace: devsecops
+  to:
+  - group: ""
+    kind: Service
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    release: monitoring
+  name: devsecops-production-alerts
+  namespace: monitoring
+spec:
+  groups:
+  - name: devsecops.application
+    rules:
+    - alert: DevSecOpsDeploymentUnavailable
+      annotations:
+        description: Deployment {{ $labels.deployment }} in namespace {{ $labels.namespace
+          }} has fewer available replicas than desired for more than 5 minutes.
+        summary: Deployment has unavailable replicas
+      expr: |
+        kube_deployment_status_replicas_available{
+          namespace= "devsecops"
+        }
+        <
+        kube_deployment_spec_replicas {
+          namespace= "devsecops"
+        }
+      for: 5m
+      labels:
+        severity: critical
+        team: devsecops
+    - alert: DevSecOpsPodRestarting
+      annotations:
+        description: Pod {{ $labels.pod }} in container {{ $labels.container }} restarted
+          more than 3 times within 10 minutes.
+        summary: Pod is restarting repeatedly
+      expr: |
+        increase(
+          kube_pod_container_status_restarts_total {
+            namespace= "devsecops"
+          }[10m]
+        ) > 3
+      for: 5m
+      labels:
+        severity: warning
+        team: devsecops
+    - alert: DevSecOpsPodNotReady
+      annotations:
+        description: Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has
+          been not ready for more than 5 minutes.
+        summary: DevSecOps pod is not ready
+      expr: |
+        kube_pod_status_ready{
+          namespace="devsecops",
+          condition="true"
+        } == 0
+      for: 5m
+      labels:
+        severity: critical
+        team: devsecops
+  - name: devsecops.infrastructure
+    rules:
+    - alert: KubernetesNodeMemoryHigh
+      annotations:
+        description: Node {{ $labels.instance }} memory usage has been above 85% for
+          more than 10 minutes.
+        summary: Kubernetes node memory usage is high
+      expr: |
+        (
+          1 -
+          node_memory_MemAvailable_bytes
+          /
+          node_memory_MemTotal_bytes
+        ) * 100 > 85
+      for: 10m
+      labels:
+        severity: warning
+        team: devsecops
+    - alert: KubernetesNodeMemoryCritical
+      annotations:
+        description: Node {{ $labels.instance }} memory usage has been above 95% for
+          more than 5 minutes.
+        summary: Kubernetes node memory usage is critical
+      expr: |
+        (
+          1 -
+          node_memory_MemAvailable_bytes
+          /
+          node_memory_MemTotal_bytes
+        ) * 100 > 95
+      for: 5m
+      labels:
+        severity: critical
+        team: devsecops
+    - alert: KubernetesNodeCPUHigh
+      annotations:
+        description: Node {{ $labels.instance }} CPU usage has been above 85% for
+          more than 10 minutes.
+        summary: Kubernetes node CPU usage is high
+      expr: |
+        100 - (
+          avg by (instance) (
+            rate(node_cpu_seconds_total{
+              mode="idle"
+            }[5m])
+          ) * 100
+        ) > 85
+      for: 10m
+      labels:
+        severity: warning
+        team: devsecops
+  - name: devsecops.monitoring
+    rules:
+    - alert: PrometheusTargetDown
+      annotations:
+        description: Prometheus target {{ $labels.job }} at {{ $labels.instance }}
+          has been down for more than 5 minutes.
+        summary: Prometheus target is down
+      expr: |
+        up == 0
+      for: 5m
+      labels:
+        severity: critical
+        team: devsecops
+    - alert: PrometheusTooManyTargetsDown
+      annotations:
+        description: More than 3 Prometheus targets are currently down.
+        summary: Multiple Prometheus targets are down
+      expr: |
+        count(up == 0) > 3
+      for: 5m
+      labels:
+        severity: critical
+        team: devsecops
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    release: monitoring
+  name: devsecops-services
+  namespace: devsecops
+spec:
+  endpoints:
+  - interval: 15s
+    path: /actuator/prometheus
+    port: http
+  namespaceSelector:
+    matchNames:
+    - devsecops
+  selector:
+    matchExpressions:
+    - key: app
+      operator: In
+      values:
+      - user-service
+      - product-service
+      - order-service

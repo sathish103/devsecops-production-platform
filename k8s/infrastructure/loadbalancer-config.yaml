@@ -1,0 +1,13 @@
+apiVersion: gateway.k8s.aws/v1beta1
+kind: LoadBalancerConfiguration
+metadata:
+  name: devsecops-alb-config
+  namespace: devsecops
+spec:
+  scheme: internet-facing
+  
+  listenerConfigurations:
+    - protocolPort: HTTPS:443
+      defaultCertificate: arn:aws:acm:ap-south-1:124666675720:certificate/9197e520-ad97-4525-a8e1-e5080148db36
+
+  

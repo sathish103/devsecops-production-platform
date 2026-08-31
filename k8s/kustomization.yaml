@@ -1,0 +1,65 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+
+  # =========================
+  # Blue Environment
+  # =========================
+  - devsecops-blue/namespace.yaml
+  - devsecops-blue/user-service.yaml
+  - devsecops-blue/product-service.yaml
+  - devsecops-blue/order-service.yaml
+  - devsecops-blue/frontend.yaml
+  - devsecops-blue/reference-grant.yaml
+
+  # =========================
+  # Green Environment
+  # =========================
+  - devsecops-green/namespace.yaml
+  - devsecops-green/user-service.yaml
+  - devsecops-green/product-service.yaml
+  - devsecops-green/order-service.yaml
+  - devsecops-green/frontend.yaml
+  - devsecops-green/reference-grant.yaml
+
+  # =========================
+  # Infrastructure
+  # =========================
+  - infrastructure/loadbalancer-config.yaml
+  - infrastructure/target-group-config.yaml
+
+  # =========================
+  # Traffic Management
+  # =========================
+  - traffic/gatewayclass.yaml
+  - traffic/gateway.yaml
+  - traffic/frontend-httproute.yaml
+  - traffic/user-httproute.yaml
+  - traffic/product-httproute.yaml
+  - traffic/order-httproute.yaml
+
+  # =========================
+  # Storage
+  # =========================
+  - storage/gp3-storageclass.yaml
+
+  # =========================
+  # Monitoring
+  # =========================
+  - monitoring/servicemonitor.yaml
+  - monitoring/alerts/devsecops-alerts.yaml
+
+images:
+
+  - name: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-user-service
+    newTag: "11"
+
+  - name: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-product-service
+    newTag: "11"
+
+  - name: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-order-service
+    newTag: "11"
+
+  - name: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-frontend
+    newTag: "11"

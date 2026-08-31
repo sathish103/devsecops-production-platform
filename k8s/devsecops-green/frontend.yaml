@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-green
+  namespace: devsecops-green
+
+spec:
+  replicas: 2
+
+  strategy:
+    type: Recreate
+
+  selector:
+    matchLabels:
+      app: frontend-green
+
+  template:
+    metadata:
+      labels:
+        app: frontend-green
+
+    spec:
+      containers:
+        - name: frontend
+          image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-frontend
+
+          ports:
+            - containerPort: 80
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-green
+  namespace: devsecops-green
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: frontend
+
+  ports:
+    - port: 80
+      targetPort: 80

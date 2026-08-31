@@ -1,0 +1,69 @@
+
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: frontend-tg
+  namespace: devsecops
+spec:
+  targetReference:
+    name: frontend-service
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /
+      healthCheckPort: "80"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: user-tg
+  namespace: devsecops
+spec:
+  targetReference:
+    name: user-service
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8081"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: product-tg
+  namespace: devsecops
+spec:
+  targetReference:
+    name: product-service
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8082"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
+
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: order-tg
+  namespace: devsecops
+spec:
+  targetReference:
+    name: order-service
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8083"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
