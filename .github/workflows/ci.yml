@@ -10,10 +10,20 @@ on:
 
 permissions:
   contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 124666675720.dkr.ecr.ap-south-1.amazonaws.com
+
+  USER_IMAGE: devsecops-user-service
+  PRODUCT_IMAGE: devsecops-product-service
+  ORDER_IMAGE: devsecops-order-service
+  FRONTEND_IMAGE: devsecops-frontend
 
 jobs:
   ci:
-    name: Build, Test & Security Scan
+    name: Build, Test, Scan & Push
     runs-on: ubuntu-latest
 
     env:
@@ -71,17 +81,138 @@ jobs:
           mvn -B clean verify -f order-service/pom.xml
 
       # ------------------------------------------------------------
-      # SONARQUBE
+      # AWS OIDC
       # ------------------------------------------------------------
-      # SonarQube will be added after the basic CI pipeline is green.
-      # This keeps the first CI implementation focused on proving:
-      # checkout -> Java 21 -> build -> test -> security scan.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::124666675720:role/GitHubActions-DevSecOps-Production
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          echo "=== AWS Identity ==="
+          aws sts get-caller-identity
 
       # ------------------------------------------------------------
-      # CI SUCCESS
+      # ECR LOGIN
       # ------------------------------------------------------------
-      - name: CI completed successfully
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ------------------------------------------------------------
+      # DOCKER BUILD
+      # ------------------------------------------------------------
+      - name: Build Docker images
+        run: |
+          set -e
+
+          echo "=== Building Docker Images ==="
+
+          docker build \
+            -t $ECR_REGISTRY/$USER_IMAGE:${{ github.sha }} \
+            ./user-service
+
+          docker build \
+            -t $ECR_REGISTRY/$PRODUCT_IMAGE:${{ github.sha }} \
+            ./product-service
+
+          docker build \
+            -t $ECR_REGISTRY/$ORDER_IMAGE:${{ github.sha }} \
+            ./order-service
+
+          docker build \
+            -t $ECR_REGISTRY/$FRONTEND_IMAGE:${{ github.sha }} \
+            ./frontend
+
+          echo "=== Docker Images ==="
+          docker images
+
+      # ------------------------------------------------------------
+      # TRIVY
+      # ------------------------------------------------------------
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg
+
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+            | gpg --dearmor \
+            | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Scan Docker images with Trivy
+        run: |
+          set -e
+
+          echo "=== Trivy Security Scan ==="
+
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            $ECR_REGISTRY/$USER_IMAGE:${{ github.sha }}
+
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            $ECR_REGISTRY/$PRODUCT_IMAGE:${{ github.sha }}
+
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            $ECR_REGISTRY/$ORDER_IMAGE:${{ github.sha }}
+
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            $ECR_REGISTRY/$FRONTEND_IMAGE:${{ github.sha }}
+
+      # ------------------------------------------------------------
+      # PUSH TO ECR
+      # ------------------------------------------------------------
+      - name: Push Docker images to ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          set -e
+
+          echo "=== Pushing Images to ECR ==="
+
+          docker push \
+            $ECR_REGISTRY/$USER_IMAGE:${{ github.sha }}
+
+          docker push \
+            $ECR_REGISTRY/$PRODUCT_IMAGE:${{ github.sha }}
+
+          docker push \
+            $ECR_REGISTRY/$ORDER_IMAGE:${{ github.sha }}
+
+          docker push \
+            $ECR_REGISTRY/$FRONTEND_IMAGE:${{ github.sha }}
+
+          echo "=== ECR Push Completed ==="
+
+      # ------------------------------------------------------------
+      # SUMMARY
+      # ------------------------------------------------------------
+      - name: CI summary
+        if: success()
         run: |
           echo "========================================="
           echo "DEVSECOPS CI PIPELINE PASSED"
           echo "========================================="
+          echo "Commit: ${{ github.sha }}"
+          echo "Images:"
+          echo "$ECR_REGISTRY/$USER_IMAGE:${{ github.sha }}"
+          echo "$ECR_REGISTRY/$PRODUCT_IMAGE:${{ github.sha }}"
+          echo "$ECR_REGISTRY/$ORDER_IMAGE:${{ github.sha }}"
+          echo "$ECR_REGISTRY/$FRONTEND_IMAGE:${{ github.sha }}"
+
