@@ -50,6 +50,7 @@ resources:
   # =========================
   - monitoring/servicemonitor.yaml
   - monitoring/alerts/devsecops-alerts.yaml
+  - monitoring/monitoring-namespace.yaml
 
 images:
 

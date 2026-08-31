@@ -27,6 +27,16 @@ spec:
           ports:
             - containerPort: 80
 
+          env:
+            - name: USER_SERVICE_URL
+              value: "http://user-service-blue.devsecops-blue.svc.cluster.local"
+
+            - name: PRODUCT_SERVICE_URL
+              value: "http://product-service-blue.devsecops-blue.svc.cluster.local"
+
+            - name: ORDER_SERVICE_URL
+              value: "http://order-service-blue.devsecops-blue.svc.cluster.local"
+
           readinessProbe:
             httpGet:
               path: /
