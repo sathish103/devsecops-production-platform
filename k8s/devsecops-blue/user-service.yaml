@@ -20,12 +20,16 @@ spec:
         app: user-service-blue
 
     spec:
+      serviceAccountName: devsecops-app
+
       containers:
         - name: user-service
+
           image: 124666675720.dkr.ecr.ap-south-1.amazonaws.com/devsecops-user-service:0fecf2b8d41851f9636a0ce5612fe820d17515f3
 
           command:
             - java
+
           args:
             - "-javaagent:/otel/opentelemetry-javaagent.jar"
             - "-jar"
@@ -59,6 +63,29 @@ spec:
             failureThreshold: 3
 
           env:
+            # MySQL connection
+            - name: DB_HOST
+              value: mysql.database.svc.cluster.local
+
+            - name: DB_PORT
+              value: "3306"
+
+            - name: DB_NAME
+              value: userdb
+
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: devsecops-mysql
+                  key: username
+
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: devsecops-mysql
+                  key: password
+
+            # OpenTelemetry
             - name: OTEL_SERVICE_NAME
               value: user-service
 
@@ -77,8 +104,18 @@ spec:
             - name: OTEL_LOGS_EXPORTER
               value: none
 
-            # AWS Secrets Manager integration will replace these
-            # Kubernetes Secret references in the next step.
+          volumeMounts:
+            - name: mysql-secrets
+              mountPath: /mnt/secrets-store
+              readOnly: true
+
+      volumes:
+        - name: mysql-secrets
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: devsecops-mysql-secrets
 
 ---
 apiVersion: v1
