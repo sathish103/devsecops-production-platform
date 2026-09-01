@@ -15,7 +15,7 @@ spec:
             type: PathPrefix
             value: /api/users
       backendRefs:
-        - name: user-service
+        - name: user-service-blue
           namespace: devsecops-blue
           port: 8081
           weight: 100
