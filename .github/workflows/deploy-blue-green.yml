@@ -1,0 +1,515 @@
+name: DevSecOps Blue-Green Production Deployment
+
+on:
+  workflow_run:
+    workflows:
+      - DevSecOps CI
+    types:
+      - completed
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  EKS_CLUSTER: devsecops-eks
+  ECR_REGISTRY: 124666675720.dkr.ecr.ap-south-1.amazonaws.com
+
+  USER_IMAGE: devsecops-user-service
+  PRODUCT_IMAGE: devsecops-product-service
+  ORDER_IMAGE: devsecops-order-service
+  FRONTEND_IMAGE: devsecops-frontend
+
+jobs:
+
+  deploy:
+    name: Blue-Green Production Deployment
+    runs-on: ubuntu-latest
+
+    # Only deploy when CI succeeded
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+
+    steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout deployment manifests
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      # ============================================================
+      # AWS AUTHENTICATION
+      # ============================================================
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::124666675720:role/GitHubActions-DevSecOps-Production
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          set -e
+
+          echo "=== AWS Identity ==="
+          aws sts get-caller-identity
+
+      # ============================================================
+      # EKS ACCESS
+      # ============================================================
+
+      - name: Configure kubectl
+        run: |
+          set -e
+
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER"
+
+          echo "=== Kubernetes Context ==="
+          kubectl config current-context
+
+          echo "=== Cluster ==="
+          kubectl cluster-info
+
+      # ============================================================
+      # DETERMINE VERSION
+      # ============================================================
+
+      - name: Determine release version
+        id: release
+        run: |
+          set -e
+
+          VERSION="${{ github.event.workflow_run.head_sha }}"
+
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+          echo "========================================="
+          echo "RELEASE VERSION"
+          echo "========================================="
+          echo "$VERSION"
+
+      # ============================================================
+      # DETERMINE ACTIVE / INACTIVE ENVIRONMENT
+      # ============================================================
+
+      - name: Detect active environment
+        id: environment
+        run: |
+          set -e
+
+          echo "========================================="
+          echo "DETECTING ACTIVE ENVIRONMENT"
+          echo "========================================="
+
+          ACTIVE_ENV=""
+
+          for ROUTE in \
+            frontend-route \
+            user-route \
+            product-route \
+            order-route
+          do
+
+            BACKEND=$(kubectl get httproute "$ROUTE" \
+              -n devsecops \
+              -o jsonpath='{.spec.rules[0].backendRefs[0].name}')
+
+            echo "$ROUTE -> $BACKEND"
+
+            if [[ "$BACKEND" == *"-blue" ]]; then
+              ACTIVE_ENV="blue"
+              break
+            fi
+
+            if [[ "$BACKEND" == *"-green" ]]; then
+              ACTIVE_ENV="green"
+              break
+            fi
+          done
+
+          if [[ -z "$ACTIVE_ENV" ]]; then
+            echo "ERROR: Could not determine active environment."
+            exit 1
+          fi
+
+          if [[ "$ACTIVE_ENV" == "blue" ]]; then
+            INACTIVE_ENV="green"
+          else
+            INACTIVE_ENV="blue"
+          fi
+
+          echo "ACTIVE_ENV=$ACTIVE_ENV" >> "$GITHUB_OUTPUT"
+          echo "INACTIVE_ENV=$INACTIVE_ENV" >> "$GITHUB_OUTPUT"
+
+          echo
+          echo "========================================="
+          echo "DEPLOYMENT STATE"
+          echo "========================================="
+          echo "ACTIVE   : $ACTIVE_ENV"
+          echo "INACTIVE : $INACTIVE_ENV"
+
+      # ============================================================
+      # DEPLOY NEW VERSION TO INACTIVE ENVIRONMENT
+      # ============================================================
+
+      - name: Deploy new version to inactive environment
+        env:
+          VERSION: ${{ steps.release.outputs.VERSION }}
+          TARGET_ENV: ${{ steps.environment.outputs.INACTIVE_ENV }}
+        run: |
+          set -e
+
+          echo "========================================="
+          echo "DEPLOYING NEW VERSION"
+          echo "========================================="
+          echo "Environment : $TARGET_ENV"
+          echo "Version     : $VERSION"
+          echo
+
+          for SERVICE in frontend user-service product-service order-service
+          do
+            case "$SERVICE" in
+              frontend)
+                DEPLOYMENT="frontend-$TARGET_ENV"
+                IMAGE="$ECR_REGISTRY/$FRONTEND_IMAGE:$VERSION"
+                ;;
+
+              user-service)
+                DEPLOYMENT="user-service-$TARGET_ENV"
+                IMAGE="$ECR_REGISTRY/$USER_IMAGE:$VERSION"
+                ;;
+
+              product-service)
+                DEPLOYMENT="product-service-$TARGET_ENV"
+                IMAGE="$ECR_REGISTRY/$PRODUCT_IMAGE:$VERSION"
+                ;;
+
+              order-service)
+                DEPLOYMENT="order-service-$TARGET_ENV"
+                IMAGE="$ECR_REGISTRY/$ORDER_IMAGE:$VERSION"
+                ;;
+            esac
+
+            echo
+            echo "Updating:"
+            echo "  Deployment: $DEPLOYMENT"
+            echo "  Image:      $IMAGE"
+
+            kubectl -n "devsecops-$TARGET_ENV" \
+              set image deployment/"$DEPLOYMENT" \
+              "$SERVICE"="$IMAGE"
+
+            kubectl -n "devsecops-$TARGET_ENV" \
+              annotate deployment/"$DEPLOYMENT" \
+              deployment.kubernetes.io/revision="$VERSION" \
+              --overwrite
+          done
+
+      # ============================================================
+      # WAIT FOR ROLLOUT
+      # ============================================================
+
+      - name: Wait for deployments
+        env:
+          TARGET_ENV: ${{ steps.environment.outputs.INACTIVE_ENV }}
+        run: |
+          set -e
+
+          NAMESPACE="devsecops-$TARGET_ENV"
+
+          echo "========================================="
+          echo "WAITING FOR ROLLOUT"
+          echo "========================================="
+
+          kubectl rollout status \
+            deployment/frontend-$TARGET_ENV \
+            -n "$NAMESPACE" \
+            --timeout=5m
+
+          kubectl rollout status \
+            deployment/user-service-$TARGET_ENV \
+            -n "$NAMESPACE" \
+            --timeout=5m
+
+          kubectl rollout status \
+            deployment/product-service-$TARGET_ENV \
+            -n "$NAMESPACE" \
+            --timeout=5m
+
+          kubectl rollout status \
+            deployment/order-service-$TARGET_ENV \
+            -n "$NAMESPACE" \
+            --timeout=5m
+
+      # ============================================================
+      # VERIFY PODS
+      # ============================================================
+
+      - name: Verify new environment
+        env:
+          TARGET_ENV: ${{ steps.environment.outputs.INACTIVE_ENV }}
+        run: |
+          set -e
+
+          NAMESPACE="devsecops-$TARGET_ENV"
+
+          echo "========================================="
+          echo "NEW ENVIRONMENT POD STATUS"
+          echo "========================================="
+
+          kubectl get pods \
+            -n "$NAMESPACE" \
+            -o wide
+
+          echo
+          echo "========================================="
+          echo "SERVICE ENDPOINTS"
+          echo "========================================="
+
+          kubectl get endpoints \
+            -n "$NAMESPACE"
+
+          echo
+          echo "========================================="
+          echo "DEPLOYMENTS"
+          echo "========================================="
+
+          kubectl get deployments \
+            -n "$NAMESPACE"
+
+      # ============================================================
+      # VERIFY NEW VERSION
+      # ============================================================
+
+      - name: Verify deployed image versions
+        env:
+          TARGET_ENV: ${{ steps.environment.outputs.INACTIVE_ENV }}
+          VERSION: ${{ steps.release.outputs.VERSION }}
+        run: |
+          set -e
+
+          NAMESPACE="devsecops-$TARGET_ENV"
+
+          echo "========================================="
+          echo "VERIFYING IMAGE VERSION"
+          echo "========================================="
+
+          for DEPLOYMENT in \
+            frontend-$TARGET_ENV \
+            user-service-$TARGET_ENV \
+            product-service-$TARGET_ENV \
+            order-service-$TARGET_ENV
+          do
+
+            IMAGE=$(kubectl get deployment "$DEPLOYMENT" \
+              -n "$NAMESPACE" \
+              -o jsonpath='{.spec.template.spec.containers[0].image}')
+
+            echo "$DEPLOYMENT -> $IMAGE"
+
+            if [[ "$IMAGE" != *":$VERSION" ]]; then
+              echo
+              echo "ERROR: Wrong image version detected."
+              echo "Expected: $VERSION"
+              echo "Actual:   $IMAGE"
+              exit 1
+            fi
+
+          done
+
+          echo
+          echo "All deployments use version $VERSION"
+
+      # ============================================================
+      # SHOW CURRENT TRAFFIC
+      # ============================================================
+
+      - name: Show current traffic
+        run: |
+          set -e
+
+          echo "========================================="
+          echo "CURRENT TRAFFIC"
+          echo "========================================="
+
+          for ROUTE in \
+            frontend-route \
+            user-route \
+            product-route \
+            order-route
+          do
+
+            echo
+            echo "----- $ROUTE -----"
+
+            kubectl get httproute "$ROUTE" \
+              -n devsecops \
+              -o jsonpath='{range .spec.rules[0].backendRefs[*]}{.name}{" = "}{.weight}{"%"}{"\n"}{end}'
+          done
+
+      # ============================================================
+      # SWITCH TRAFFIC
+      # ============================================================
+
+      - name: Switch traffic to new environment
+        env:
+          ACTIVE_ENV: ${{ steps.environment.outputs.ACTIVE_ENV }}
+          INACTIVE_ENV: ${{ steps.environment.outputs.INACTIVE_ENV }}
+        run: |
+          set -e
+
+          echo "========================================="
+          echo "SWITCHING PRODUCTION TRAFFIC"
+          echo "========================================="
+          echo "OLD ACTIVE : $ACTIVE_ENV"
+          echo "NEW ACTIVE : $INACTIVE_ENV"
+
+          for ROUTE in \
+            frontend-route \
+            user-route \
+            product-route \
+            order-route
+          do
+
+            case "$ROUTE" in
+              frontend-route)
+                NEW_SERVICE="frontend-$INACTIVE_ENV"
+                OLD_SERVICE="frontend-$ACTIVE_ENV"
+                PORT="80"
+                ;;
+
+              user-route)
+                NEW_SERVICE="user-service-$INACTIVE_ENV"
+                OLD_SERVICE="user-service-$ACTIVE_ENV"
+                PORT="8081"
+                ;;
+
+              product-route)
+                NEW_SERVICE="product-service-$INACTIVE_ENV"
+                OLD_SERVICE="product-service-$ACTIVE_ENV"
+                PORT="8082"
+                ;;
+
+              order-route)
+                NEW_SERVICE="order-service-$INACTIVE_ENV"
+                OLD_SERVICE="order-service-$ACTIVE_ENV"
+                PORT="8083"
+                ;;
+            esac
+
+            echo
+            echo "Updating $ROUTE"
+            echo "OLD: $OLD_SERVICE = 0%"
+            echo "NEW: $NEW_SERVICE = 100%"
+
+            kubectl patch httproute "$ROUTE" \
+              -n devsecops \
+              --type='json' \
+              -p="[
+                {
+                  \"op\": \"replace\",
+                  \"path\": \"/spec/rules/0/backendRefs\",
+                  \"value\": [
+                    {
+                      \"group\": \"\",
+                      \"kind\": \"Service\",
+                      \"name\": \"$NEW_SERVICE\",
+                      \"namespace\": \"devsecops-$INACTIVE_ENV\",
+                      \"port\": $PORT,
+                      \"weight\": 100
+                    }
+                  ]
+                }
+              ]"
+
+          done
+
+      # ============================================================
+      # VERIFY ROUTES
+      # ============================================================
+
+      - name: Verify traffic switch
+        env:
+          EXPECTED_ENV: ${{ steps.environment.outputs.INACTIVE_ENV }}
+        run: |
+          set -e
+
+          echo "========================================="
+          echo "VERIFYING PRODUCTION TRAFFIC"
+          echo "========================================="
+
+          for ROUTE in \
+            frontend-route \
+            user-route \
+            product-route \
+            order-route
+          do
+
+            BACKEND=$(kubectl get httproute "$ROUTE" \
+              -n devsecops \
+              -o jsonpath='{.spec.rules[0].backendRefs[0].name}')
+
+            WEIGHT=$(kubectl get httproute "$ROUTE" \
+              -n devsecops \
+              -o jsonpath='{.spec.rules[0].backendRefs[0].weight}')
+
+            echo "$ROUTE -> $BACKEND = $WEIGHT%"
+
+            if [[ "$BACKEND" != *"-$EXPECTED_ENV" ]]; then
+              echo "ERROR: $ROUTE is not pointing to $EXPECTED_ENV"
+              exit 1
+            fi
+
+            if [[ "$WEIGHT" != "100" ]]; then
+              echo "ERROR: $ROUTE is not receiving 100% traffic"
+              exit 1
+            fi
+
+          done
+
+      # ============================================================
+      # FINAL STATE
+      # ============================================================
+
+      - name: Production deployment summary
+        env:
+          ACTIVE_ENV: ${{ steps.environment.outputs.INACTIVE_ENV }}
+          OLD_ENV: ${{ steps.environment.outputs.ACTIVE_ENV }}
+          VERSION: ${{ steps.release.outputs.VERSION }}
+        run: |
+          echo
+          echo "============================================================"
+          echo "        DEVSECOPS PRODUCTION DEPLOYMENT COMPLETE"
+          echo "============================================================"
+          echo
+          echo "ACTIVE ENVIRONMENT"
+          echo "------------------"
+          echo "$ACTIVE_ENV"
+          echo
+          echo "ACTIVE VERSION"
+          echo "--------------"
+          echo "$VERSION"
+          echo
+          echo "INACTIVE ENVIRONMENT"
+          echo "--------------------"
+          echo "$OLD_ENV"
+          echo
+          echo "TRAFFIC"
+          echo "-------"
+          echo "100% -> $ACTIVE_ENV"
+          echo "0%   -> $OLD_ENV"
+          echo
+          echo "ROLLBACK"
+          echo "--------"
+          echo "Restore HTTPRoutes to $OLD_ENV"
+          echo
+          echo "============================================================"
