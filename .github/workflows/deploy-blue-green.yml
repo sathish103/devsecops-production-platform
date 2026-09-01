@@ -175,44 +175,32 @@ jobs:
           echo "Version     : $VERSION"
           echo
 
-          for SERVICE in frontend user-service product-service order-service
-          do
-            case "$SERVICE" in
-              frontend)
-                DEPLOYMENT="frontend-$TARGET_ENV"
-                IMAGE="$ECR_REGISTRY/$FRONTEND_IMAGE:$VERSION"
-                ;;
+          NAMESPACE="devsecops-$TARGET_ENV"
 
-              user-service)
-                DEPLOYMENT="user-service-$TARGET_ENV"
-                IMAGE="$ECR_REGISTRY/$USER_IMAGE:$VERSION"
-                ;;
+          echo "Applying Kubernetes manifests..."
+          kubectl apply -f "k8s/devsecops-$TARGET_ENV/" 
 
-              product-service)
-                DEPLOYMENT="product-service-$TARGET_ENV"
-                IMAGE="$ECR_REGISTRY/$PRODUCT_IMAGE:$VERSION"
-                ;;
+          echo
+          echo "Updating images..."
 
-              order-service)
-                DEPLOYMENT="order-service-$TARGET_ENV"
-                IMAGE="$ECR_REGISTRY/$ORDER_IMAGE:$VERSION"
-                ;;
-            esac
+          kubectl -n "$NAMESPACE" \
+            set image deployment/frontend-$TARGET_ENV \
+            frontend="$ECR_REGISTRY/$FRONTEND_IMAGE:$VERSION"
 
-            echo
-            echo "Updating:"
-            echo "  Deployment: $DEPLOYMENT"
-            echo "  Image:      $IMAGE"
+          kubectl -n "$NAMESPACE" \
+            set image deployment/user-service-$TARGET_ENV \
+            user-service="$ECR_REGISTRY/$USER_IMAGE:$VERSION"
 
-            kubectl -n "devsecops-$TARGET_ENV" \
-              set image deployment/"$DEPLOYMENT" \
-              "$SERVICE"="$IMAGE"
+          kubectl -n "$NAMESPACE" \
+            set image deployment/product-service-$TARGET_ENV \
+            product-service="$ECR_REGISTRY/$PRODUCT_IMAGE:$VERSION"
 
-            kubectl -n "devsecops-$TARGET_ENV" \
-              annotate deployment/"$DEPLOYMENT" \
-              deployment.kubernetes.io/revision="$VERSION" \
-              --overwrite
-          done
+          kubectl -n "$NAMESPACE" \
+            set image deployment/order-service-$TARGET_ENV \
+            order-service="$ECR_REGISTRY/$ORDER_IMAGE:$VERSION"
+
+          echo
+          echo "Deployment manifests applied and images updated."
 
       # ============================================================
       # WAIT FOR ROLLOUT
