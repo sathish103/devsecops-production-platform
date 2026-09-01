@@ -19,3 +19,7 @@ spec:
           namespace: devsecops-blue
           port: 8081
           weight: 100
+        - name: user-service-green  
+          namespace: devsecops-green
+          port: 8081
+          weight: 0

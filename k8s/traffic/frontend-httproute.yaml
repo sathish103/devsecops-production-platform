@@ -17,3 +17,8 @@ spec:
           namespace: devsecops-blue
           port: 80
           weight: 100
+
+        - name: frontend-green
+          namespace: devsecops-green
+          port: 80
+          weight: 0

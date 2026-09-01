@@ -15,4 +15,8 @@ spec:
         - name: order-service-blue
           namespace: devsecops-blue
           port: 8083
-          weight: 100
+          weight: 100      
+        - name: order-service-green
+          namespace: devsecops-green
+          port: 8083
+          weight: 0

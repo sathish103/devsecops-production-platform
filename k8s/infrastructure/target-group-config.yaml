@@ -2,11 +2,11 @@
 apiVersion: gateway.k8s.aws/v1beta1
 kind: TargetGroupConfiguration
 metadata:
-  name: frontend-tg
-  namespace: devsecops
+  name: frontend-blue-tgc
+  namespace: devsecops-blue
 spec:
   targetReference:
-    name: frontend-service
+    name: frontend-blue
   defaultConfiguration:
     targetType: ip
     healthCheckConfig:
@@ -19,11 +19,29 @@ spec:
 apiVersion: gateway.k8s.aws/v1beta1
 kind: TargetGroupConfiguration
 metadata:
-  name: user-tg
-  namespace: devsecops
+  name: frontend-green-tgc
+  namespace: devsecops-green
 spec:
   targetReference:
-    name: user-service
+    name: frontend-green
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /
+      healthCheckPort: "80"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
+---
+
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: user-blue-tgc
+  namespace: devsecops-blue
+spec:
+  targetReference:
+    name: user-service-blue
   defaultConfiguration:
     targetType: ip
     healthCheckConfig:
@@ -33,14 +51,35 @@ spec:
       matcher:
         httpCode: "200-399"
 ---
+
 apiVersion: gateway.k8s.aws/v1beta1
 kind: TargetGroupConfiguration
 metadata:
-  name: product-tg
+  name: user-green-tgc
   namespace: devsecops
 spec:
   targetReference:
-    name: product-service
+    name: user-service-green
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8081"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
+---
+
+
+
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: product-blue-tgc
+  namespace: devsecops
+spec:
+  targetReference:
+    name: product-service-blue
   defaultConfiguration:
     targetType: ip
     healthCheckConfig:
@@ -54,11 +93,48 @@ spec:
 apiVersion: gateway.k8s.aws/v1beta1
 kind: TargetGroupConfiguration
 metadata:
-  name: order-tg
-  namespace: devsecops
+  name: product-green-tgc
+  namespace: devsecops-green
 spec:
   targetReference:
-    name: order-service
+    name: product-service-green
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8082"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
+
+---
+
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: order-blue-tgc
+  namespace: devsecops-blue
+spec:
+  targetReference:
+    name: order-service-blue
+  defaultConfiguration:
+    targetType: ip
+    healthCheckConfig:
+      healthCheckPath: /actuator/health
+      healthCheckPort: "8083"
+      healthCheckProtocol: http
+      matcher:
+        httpCode: "200-399"
+
+---
+apiVersion: gateway.k8s.aws/v1beta1
+kind: TargetGroupConfiguration
+metadata:
+  name: order-green-tgc
+  namespace: devsecops-green
+spec:
+  targetReference:
+    name: order-service-green
   defaultConfiguration:
     targetType: ip
     healthCheckConfig:
