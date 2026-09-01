@@ -38,6 +38,9 @@ spec:
             - |
               export DB_USERNAME="$(cat /mnt/secrets-store/mysql-username)"
               export DB_PASSWORD="$(cat /mnt/secrets-store/mysql-password)"
+              export JWT_SECRET="$(cat /mnt/secrets-store/jwt-secret)"
+              export JWT_EXPIRATION="$(cat /mnt/secrets-store/jwt-expiration)"
+              
               exec java \
                 -javaagent:/otel/opentelemetry-javaagent.jar \
                 -jar \

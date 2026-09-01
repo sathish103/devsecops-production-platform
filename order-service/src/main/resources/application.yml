@@ -11,7 +11,7 @@ spring:
       ddl-auto: update
 
 jwt:
-  secret: ${JWT_SECRET:changeit}
+  secret: ${JWT_SECRET}
 
 product:
   service:
