@@ -56,7 +56,7 @@ apiVersion: gateway.k8s.aws/v1beta1
 kind: TargetGroupConfiguration
 metadata:
   name: user-green-tgc
-  namespace: devsecops
+  namespace: devsecops-green
 spec:
   targetReference:
     name: user-service-green
@@ -76,7 +76,7 @@ apiVersion: gateway.k8s.aws/v1beta1
 kind: TargetGroupConfiguration
 metadata:
   name: product-blue-tgc
-  namespace: devsecops
+  namespace: devsecops-blue
 spec:
   targetReference:
     name: product-service-blue
