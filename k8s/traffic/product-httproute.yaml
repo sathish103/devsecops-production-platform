@@ -12,5 +12,7 @@ spec:
             type: PathPrefix
             value: /api/products
       backendRefs:
-        - name: product-service
+        - name: product-service-blue
+          namespace: devsecops-blue
           port: 8082
+          weight: 100

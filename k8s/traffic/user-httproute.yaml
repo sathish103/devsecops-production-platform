@@ -16,4 +16,6 @@ spec:
             value: /api/users
       backendRefs:
         - name: user-service
+          namespace: devsecops-blue
           port: 8081
+          weight: 100

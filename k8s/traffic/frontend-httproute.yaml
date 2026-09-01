@@ -13,5 +13,7 @@ spec:
           type: PathPrefix
           value: /
       backendRefs:
-        - name: frontend-service
+        - name: frontend-blue
+          namespace: devsecops-blue
           port: 80
+          weight: 100

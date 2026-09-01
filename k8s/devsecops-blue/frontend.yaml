@@ -64,7 +64,7 @@ spec:
   type: ClusterIP
 
   selector:
-    app: frontend
+    app: frontend-blue
 
   ports:
     - port: 80

@@ -12,5 +12,7 @@ spec:
             type: PathPrefix
             value: /api/orders
       backendRefs:
-        - name: order-service
+        - name: order-service-blue
+          namespace: devsecops-blue
           port: 8083
+          weight: 100
