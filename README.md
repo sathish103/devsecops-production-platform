@@ -1,4168 +1,4154 @@
-# DevSecOps Project — End-to-End Implementation Guide
+🚀 DevSecOps Production Platform
 
-> **Purpose:** This document is the implementation runbook for deploying the DevSecOps platform on AWS from an empty AWS environment to a working application with CI/CD, security scanning, GitOps, blue/green deployments, metrics, logs, traces, and public HTTPS access.
->
-> The goal is that another engineer can follow this document **step by step and understand why each step exists**, not merely copy commands.
+Production-grade DevSecOps CI/CD platform on AWS EKS with GitHub Actions, Amazon ECR, Kubernetes Gateway API, AWS Load Balancer Controller, blue-green deployments, immutable releases, security gates, and automatic rollback.
 
----
 
-## 0. Important Security Notice
 
-The original notes contained real-looking AWS access keys, database passwords, Gmail app passwords, JWT secrets, SonarQube tokens, and other credentials.
 
-**Those values must not be stored in `README.md`, Git, screenshots, Jenkinsfiles, or Kubernetes manifests.**
 
-Before using this project:
 
-1. Revoke/rotate any credentials that were previously exposed.
-2. Create new credentials where required.
-3. Replace every `<PLACEHOLDER>` in this document with your own value.
-4. Prefer AWS IAM roles, EKS Pod Identity, Kubernetes Secrets, Jenkins Credentials, and secret managers instead of hard-coding credentials.
 
-This document intentionally uses placeholders such as:
 
-- `<AWS_ACCOUNT_ID>`
-- `<AWS_REGION>`
-- `<VPC_ID>`
-- `<RDS_ENDPOINT>`
-- `<RDS_PASSWORD>`
-- `<GITHUB_REPOSITORY>`
-- `<DOMAIN>`
-- `<ACM_CERTIFICATE_ARN>`
-- `<GMAIL_APP_PASSWORD>`
-- `<SONARQUBE_TOKEN>`
+📌 What Is This Project?
 
----
+This project implements an end-to-end DevSecOps production delivery platform for a containerized microservices application running on Amazon EKS.
 
-# 1. Solution Overview
+The platform automates the complete path from a developer commit to production:
 
-The platform contains the following major components:
-
-- AWS VPC
-- Public, private, and data subnets
-- Internet Gateway
-- NAT Gateway
-- Bastion EC2 instance
-- Jenkins EC2 instance
-- Amazon EKS
-- Amazon ECR
-- Amazon RDS MySQL
-- AWS Load Balancer Controller
-- Kubernetes Gateway API
-- Route 53
-- ACM
-- Argo CD
-- Argo Rollouts
-- Maven
-- SonarQube
-- Trivy
-- Gitleaks
-- Prometheus
-- Alertmanager
-- Grafana
-- Loki
-- Grafana Alloy
-- Tempo
-- Amazon S3 for Loki and Tempo storage
-- EBS CSI Driver
-- GitHub
-- Kustomize
-
----
-
-# 2. Overall Architecture
-
-## 2.1 AWS Infrastructure Architecture
-
-```text
-                              Internet
-                                  |
-                           Route 53 DNS
-                                  |
-                            ACM Certificate
-                                  |
-                         AWS Load Balancer
-                                  |
-                    +-------------+-------------+
-                    |                           |
-              Public Subnets              Public Subnets
-              10.0.1.0/24                 10.0.2.0/24
-                    |                           |
-              Bastion EC2                 NAT Gateway
-                    |                           |
-                    |                     Private Subnets
-                    |                     10.0.11.0/24
-                    |                     10.0.12.0/24
-                    |                           |
-                    |                    EKS Worker Nodes
-                    |                           |
-                    |                 +---------+---------+
-                    |                 |         |         |
-                    |              Frontend   Backend   Monitoring
-                    |                 |       Services    Stack
-                    |                 |       |           |
-                    |                 |       |        Grafana
-                    |                 |       |        Prometheus
-                    |                 |       |        Loki
-                    |                 |       |        Tempo
-                    |                 |       |
-                    |                 |     RDS MySQL
-                    |                 |
-                    +---------- Jenkins EC2
-                                      |
-                                CI/CD Pipeline
-```
-
----
-
-## 2.2 CI/CD and GitOps Architecture
-
-```text
 Developer
-   |
-   v
+   │
+   │ git push origin main
+   ▼
 GitHub
-   |
-   | source code
-   v
-Jenkins
-   |
-   +--> Maven Build
-   |
-   +--> Unit Tests
-   |
-   +--> Gitleaks
-   |
-   +--> SonarQube
-   |
-   +--> Trivy
-   |
-   +--> Docker Build
-   |
-   +--> Docker Image
-   |
-   v
+   │
+   ▼
+GitHub Actions CI
+   │
+   ├── Build & Test
+   ├── Gitleaks Secret Scan
+   ├── Docker Image Build
+   ├── Trivy Vulnerability Scan
+   ├── GitHub OIDC → AWS IAM
+   └── Push immutable images to Amazon ECR
+   │
+   ▼
+CI SUCCESS
+   │
+   ▼
+GitHub Actions CD
+   │
+   ├── Detect active environment
+   ├── Identify inactive environment
+   ├── Deploy new release to inactive environment
+   ├── Wait for Kubernetes rollout
+   ├── Validate replicas
+   ├── Validate image SHA
+   ├── Switch production traffic: 100%
+   ├── Verify production
+   └── Roll back automatically if final verification fails
+   │
+   ▼
+Amazon EKS Production
+
+The key design principle is:
+
+Deploy first → validate completely → switch 100% traffic → verify → rollback if required.
+
+The current implementation uses blue-green deployment with a direct 100% traffic switch. It does not use gradual canary percentages such as 10%, 25%, 50%, or 75%.
+
+🏗️ Architecture Overview
+
+                                  ┌──────────────────────┐
+                                  │      Developer       │
+                                  └──────────┬───────────┘
+                                             │
+                                      git push origin main
+                                             │
+                                             ▼
+                                  ┌──────────────────────┐
+                                  │   GitHub Repository  │
+                                  │       main branch    │
+                                  └──────────┬───────────┘
+                                             │
+                                             ▼
+                         ┌────────────────────────────────────┐
+                         │          GitHub Actions CI          │
+                         │                                    │
+                         │  1. Build & Test                   │
+                         │  2. Gitleaks                       │
+                         │  3. Docker Build                   │
+                         │  4. Trivy Scan                     │
+                         │  5. GitHub OIDC → AWS IAM          │
+                         │  6. Push images → Amazon ECR       │
+                         └──────────────────┬─────────────────┘
+                                            │
+                                      CI SUCCESS
+                                            │
+                                            ▼
+                         ┌────────────────────────────────────┐
+                         │          GitHub Actions CD          │
+                         │                                    │
+                         │  Detect Active Environment         │
+                         │             │                      │
+                         │             ▼                      │
+                         │  Deploy to Inactive Environment   │
+                         │             │                      │
+                         │             ▼                      │
+                         │  Rollout + Image Validation       │
+                         │             │                      │
+                         │             ▼                      │
+                         │       100% Traffic Switch          │
+                         │             │                      │
+                         │             ▼                      │
+                         │     Production Verification        │
+                         │             │                      │
+                         │        ┌────┴────┐                 │
+                         │        │         │                 │
+                         │     SUCCESS    FAILURE              │
+                         │        │         │                 │
+                         │        ▼         ▼                 │
+                         │      DONE     ROLLBACK              │
+                         └──────────────────┬─────────────────┘
+                                            │
+                                            ▼
+                         ┌────────────────────────────────────┐
+                         │             Amazon EKS              │
+                         │                                    │
+                         │       Production Gateway            │
+                         │              │                     │
+                         │          HTTPRoutes                 │
+                         │              │                     │
+                         │       ┌──────┴──────┐              │
+                         │       │             │              │
+                         │       ▼             ▼              │
+                         │     BLUE          GREEN            │
+                         │  devsecops-blue devsecops-green   │
+                         └────────────────────────────────────┘
+
+🧩 Application Components
+
+The platform contains four application workloads:
+
+Component
+
+Container Image
+
+Production Port
+
+Frontend
+
+devsecops-frontend
+
+80
+
+User Service
+
+devsecops-user-service
+
+8081
+
+Product Service
+
+devsecops-product-service
+
+8082
+
+Order Service
+
+devsecops-order-service
+
+8083
+
+Each production workload exists in both environments:
+
+devsecops-blue
+├── frontend-blue
+├── user-service-blue
+├── product-service-blue
+└── order-service-blue
+
+devsecops-green
+├── frontend-green
+├── user-service-green
+├── product-service-green
+└── order-service-green
+
+🔐 Technology Stack
+
+Layer
+
+Technology
+
+Source Control
+
+GitHub
+
+CI/CD
+
+GitHub Actions
+
+Cloud
+
+AWS
+
+Kubernetes
+
+Amazon EKS
+
+Container Runtime
+
+Docker
+
+Container Registry
+
 Amazon ECR
-   |
-   | image reference
-   v
-Git / Kustomize
-   |
-   v
-Argo CD
-   |
-   v
+
+AWS Authentication
+
+GitHub OIDC + IAM
+
+Build
+
+Maven
+
+Java
+
+Java 21
+
+Secret Detection
+
+Gitleaks
+
+Container Security
+
+Trivy
+
+Traffic Management
+
+Kubernetes Gateway API
+
+Gateway
+
+Kubernetes Gateway
+
+Routing
+
+Kubernetes HTTPRoute
+
+AWS Integration
+
+AWS Load Balancer Controller
+
+AWS Load Balancing
+
+Application Load Balancer
+
+Deployment Strategy
+
+Blue-Green
+
+Release Version
+
+Git Commit SHA
+
+🌿 Branch Strategy
+
+The production delivery flow is centered around the main branch.
+
+Developer
+   │
+   │ git push
+   ▼
+ main
+   │
+   ▼
+ GitHub Actions CI
+   │
+   ▼
+ ECR
+   │
+   ▼
+ GitHub Actions CD
+   │
+   ▼
+ Production
+
+The important production rule is:
+
+Only successful CI execution from a push to main
+can trigger production CD.
+
+The CD workflow explicitly checks:
+
+CI conclusion = success
+CI event       = push
+CI branch      = main
+
+This prevents other workflow executions from accidentally deploying to production.
+
+🔄 CI — Continuous Integration
+
+CI Objective
+
+The CI pipeline answers:
+
+"Is this source code safe, tested, buildable, and ready to become a production artifact?"
+
+The pipeline performs:
+
+Source Code
+    │
+    ▼
+Build & Test
+    │
+    ▼
+Gitleaks
+    │
+    ▼
+Docker Build
+    │
+    ▼
+Trivy
+    │
+    ▼
+AWS OIDC
+    │
+    ▼
+Amazon ECR
+
+🧪 CI Stage 1 — Build & Test
+
+Three Java services are built using a matrix strategy:
+
+┌─────────────────┐
+│  user-service   │
+└────────┬────────┘
+         │
+┌─────────────────┐
+│ product-service │
+└────────┬────────┘
+         │
+┌─────────────────┐
+│  order-service  │
+└─────────────────┘
+
+Each service runs:
+
+mvn -B clean verify
+
+Using:
+
+Java 21
+Maven
+
+If any service fails:
+
+CI STOP
+   ✕
+No security stage
+No Docker push
+No production deployment
+
+🔎 CI Stage 2 — Gitleaks
+
+After successful tests, Gitleaks scans the repository for accidentally committed secrets.
+
+Build & Test
+     │
+     ▼
+ Gitleaks
+     │
+ ┌───┴────┐
+ │        │
+FAIL     PASS
+ │        │
+ ▼        ▼
+STOP    Continue
+
+The objective is to prevent secrets such as credentials, tokens, or keys from progressing through the delivery pipeline.
+
+🐳 CI Stage 3 — Docker Build
+
+Four images are built:
+
+devsecops-user-service
+devsecops-product-service
+devsecops-order-service
+devsecops-frontend
+
+Each image uses the Git commit SHA as its tag.
+
+Example:
+
+devsecops-user-service:<commit-sha>
+
+This creates the relationship:
+
+Git Commit
+    │
+    ▼
+Docker Image
+    │
+    ▼
+ECR
+    │
+    ▼
 EKS
-   |
-   v
-Argo Rollouts
-   |
-   +--> Stable Version
-   |
-   +--> Preview Version
-   |
-   +--> Manual Promotion
-```
-
----
-
-## 2.3 Observability Architecture
-
-```text
-Kubernetes Applications
-        |
-        +----------------------+
-        |                      |
-        v                      v
-   Application Logs        OpenTelemetry
-        |                      |
-        v                      v
-   Grafana Alloy        OTEL instrumentation
-        |                      |
-        v                      v
-       Loki                  Tempo
-        |                      |
-        +----------+-----------+
-                   |
-                   v
-                Grafana
-                   |
-        +----------+----------+
-        |          |          |
-     Metrics      Logs      Traces
-        |          |          |
-   Prometheus     Loki       Tempo
-```
+    │
+    ▼
+Production
 
----
+There is no dependency on a mutable latest tag.
 
-# 3. Prerequisites
+🛡️ CI Stage 4 — Trivy
 
-You need:
+Each Docker image is scanned using Trivy.
 
-- An AWS account
-- A domain name
-- A GitHub repository
-- Windows local machine
-- Git Bash or Command Prompt
-- AWS CLI
-- SSH key pair (`demo.pem` in the original setup)
-- IAM permissions sufficient to create the required infrastructure
-- A Gmail account if email alerting is required
+The pipeline checks:
 
-AWS region used by this project:
+HIGH
+CRITICAL
 
-```text
-ap-south-1
-```
+with:
 
----
+--severity HIGH,CRITICAL
+--exit-code 1
+--ignore-unfixed
 
-# 4. Configure AWS CLI on Windows
+If the scan fails:
 
-## 4.1 Install AWS CLI
+Trivy FAIL
+    │
+    ▼
+CI FAIL
+    │
+    X
+No ECR push
+No CD
 
-Download and install AWS CLI for Windows:
+This creates a security gate before the image becomes a production artifact.
 
-https://awscli.amazonaws.com/AWSCLIV2.msi
+🔑 CI Stage 5 — GitHub OIDC → AWS IAM
 
-After installation:
+GitHub Actions does not require long-lived AWS access keys.
 
-```bash
-aws --version
-```
+Instead:
 
-## 4.2 Configure AWS CLI
+GitHub Actions
+      │
+      │ OIDC token
+      ▼
+GitHub OIDC Provider
+      │
+      │ AssumeRoleWithWebIdentity
+      ▼
+AWS IAM Role
+      │
+      ▼
+AWS APIs
 
-```bash
-aws configure
-```
+The GitHub Actions role is:
 
-Enter your newly generated credentials:
+GitHubActions-DevSecOps-Production
 
-```text
-AWS Access Key ID: <AWS_ACCESS_KEY_ID>
-AWS Secret Access Key: <AWS_SECRET_ACCESS_KEY>
-Default region name: ap-south-1
-Default output format: json
-```
+This role provides the permissions required by the CI/CD workflows.
 
-## 4.3 Verify AWS Access
+📦 CI Stage 6 — Push to Amazon ECR
 
-```bash
-aws sts get-caller-identity
-aws s3 ls
-```
+After all previous stages succeed:
 
-If these commands work, the local AWS CLI configuration is valid.
+GitHub Actions
+      │
+      ▼
+AWS OIDC
+      │
+      ▼
+Amazon ECR Login
+      │
+      ▼
+Push 4 SHA-tagged images
 
----
+Images:
 
-# 5. Create the VPC
+devsecops-user-service:<SHA>
+devsecops-product-service:<SHA>
+devsecops-order-service:<SHA>
+devsecops-frontend:<SHA>
 
-Create:
+At this point CI is complete.
 
-```text
-VPC Name: devsecops-vpc
-CIDR:     10.0.0.0/16
-```
+CI SUCCESS
+    │
+    ▼
+CD automatically starts
 
-## 5.1 Internet Gateway
+🚀 CD — Continuous Deployment
 
-Create:
+CD Objective
 
-```text
-devsecops-igw
-```
+The CD pipeline answers:
 
-Attach it to:
+"How can the new version be safely introduced into production without replacing the currently serving environment until the candidate is ready?"
 
-```text
-devsecops-vpc
-```
+The answer is:
 
----
+Deploy new release to INACTIVE environment
+                │
+                ▼
+          Validate completely
+                │
+                ▼
+       Switch traffic 100%
+                │
+                ▼
+        Verify production
+                │
+        ┌───────┴────────┐
+        │                │
+      PASS             FAIL
+        │                │
+        ▼                ▼
+      DONE            ROLLBACK
 
-# 6. Create Subnets
+🔵🟢 Blue-Green Environment Model
 
-Create two subnets in different Availability Zones for high availability.
+There are two production environments:
 
-## 6.1 Public Subnets
+                 PRODUCTION
+                     │
+             ┌───────┴───────┐
+             │               │
+             ▼               ▼
+          BLUE             GREEN
+     devsecops-blue    devsecops-green
 
-| Name | CIDR | Public IPv4 |
-|---|---|---|
-| devsecops-pub-subnet-1a | 10.0.1.0/24 | Enabled |
-| devsecops-pub-subnet-1b | 10.0.2.0/24 | Enabled |
+Only one environment receives production traffic.
 
-## 6.2 Private Subnets
+Example:
 
-| Name | CIDR |
-|---|---|
-| devsecops-private-subnet-1a | 10.0.11.0/24 |
-| devsecops-private-subnet-1b | 10.0.12.0/24 |
+BLUE  = ACTIVE
+GREEN = INACTIVE
 
-## 6.3 Data Subnets
+or:
 
-| Name | CIDR |
-|---|---|
-| devsecops-data-subnet-1a | 10.0.21.0/24 |
-| devsecops-data-subnet-1b | 10.0.22.0/24 |
+GREEN = ACTIVE
+BLUE  = INACTIVE
 
-The data subnets are used for RDS.
+The CD workflow detects this automatically.
 
----
+🧭 CD Stage 1 — Detect Active Environment
 
-# 7. Create NAT Gateway
+The workflow first checks the production HTTPRoute state.
 
-Create:
+It reads:
 
-```text
-devsecops-nat-gw
-```
+frontend-route
+user-route
+product-route
+order-route
 
-Place the NAT Gateway in a public subnet and associate an Elastic IP.
+For example:
 
-The purpose of the NAT Gateway is to allow resources in private subnets to reach the internet without making those resources publicly reachable.
+frontend-route  → frontend-green
+user-route      → user-service-green
+product-route   → product-service-green
+order-route     → order-service-green
 
----
+Therefore:
 
-# 8. Create Route Tables
+ACTIVE   = GREEN
+INACTIVE = BLUE
 
-## 8.1 Public Route Table
+The workflow also verifies that all four routes agree.
 
-Create:
+If one route points to BLUE while the others point to GREEN:
 
-```text
-devsecops-pub-rt
-```
+Production state inconsistent
+          │
+          ▼
+       CD STOPS
 
-Add:
+This protects against deploying from an unexpected routing state.
 
-```text
-0.0.0.0/0 -> devsecops-igw
-```
+🆕 CD Stage 2 — Deploy to Inactive Environment
 
-Associate:
+Suppose:
 
-- devsecops-pub-subnet-1a
-- devsecops-pub-subnet-1b
+GREEN = ACTIVE
+BLUE  = INACTIVE
 
-## 8.2 Private Route Table
+The new release is deployed to:
 
-Create:
+devsecops-blue
 
-```text
-devsecops-private-rt
-```
+The workflow updates:
 
-Add:
+frontend-blue
+user-service-blue
+product-service-blue
+order-service-blue
 
-```text
-0.0.0.0/0 -> devsecops-nat-gw
-```
+using the exact SHA generated by CI.
 
-Associate:
+Important:
 
-- devsecops-private-subnet-1a
-- devsecops-private-subnet-1b
-- devsecops-data-subnet-1a
-- devsecops-data-subnet-1b
+Production traffic has not changed yet.
 
----
+The state is:
 
-# 9. Security Groups
+                 Production Traffic
+                       │
+                       ▼
+                    GREEN
+                     100%
 
-## 9.1 Bastion Security Group
+                    BLUE
+                      0%
+                  new release
 
-Name:
+⏳ CD Stage 3 — Kubernetes Rollout Validation
 
-```text
-bastion-sg
-```
+The workflow waits for every candidate deployment:
 
-Required access:
+frontend-blue
+user-service-blue
+product-service-blue
+order-service-blue
 
-- SSH 22 from your administrative IP
-- Ports 8080, 9000, 9090, and 3000 as required for temporary SSH tunnel/port-forward access
+It waits using Kubernetes rollout status.
 
-**Do not expose these ports to `0.0.0.0/0` unnecessarily.** Restrict them to your own public IP where possible.
+Then it validates:
 
-## 9.2 Jenkins Security Group
+Desired replicas
+Updated replicas
+Ready replicas
+Available replicas
 
-Name:
+The candidate must be fully ready.
 
-```text
-jenkins-sg
-```
+🧾 CD Stage 4 — Image SHA Validation
 
-Allow:
+The workflow checks the actual image configured in each deployment.
 
-- 22 from `bastion-sg`
-- 8080 from `bastion-sg`
-- 9000 from `bastion-sg`
+Expected:
 
-## 9.3 RDS Security Group
+ECR image : <CI commit SHA>
 
-Name:
+Actual:
 
-```text
-devsecops-rds-sg
-```
+Kubernetes deployment image
 
-Allow:
+If they do not match:
 
-```text
-TCP 3306
-Source: bastion-sg
-Source: EKS security group / node security group as appropriate
-```
+Candidate validation FAIL
+        │
+        ▼
+Production traffic remains unchanged
 
-Do not expose MySQL port 3306 to the public internet.
+This prevents an unexpected image from becoming active.
 
----
+✅ Candidate Ready
 
-# 10. Launch Bastion EC2
+Only after all candidate checks pass:
 
-Create:
+┌────────────────────────────────────┐
+│       PRODUCTION CANDIDATE READY   │
+├────────────────────────────────────┤
+│                                    │
+│ Current Active : GREEN             │
+│ New Candidate  : BLUE              │
+│ Version        : <commit-sha>      │
+│                                    │
+│ Production traffic: UNCHANGED      │
+│                                    │
+└────────────────────────────────────┘
 
-```text
-Name:       bastion-server
-AMI:        Amazon Linux
-Type:       t3.small
-Key pair:   demo.pem
-VPC:        devsecops-vpc
-Subnet:     devsecops-pub-subnet-1a
-SG:         bastion-sg
-Storage:    8 GB
-```
+Now the traffic switch can occur.
 
-The bastion is the administration entry point into the private environment.
+🔀 CD Stage 5 — Where Does the Traffic Switch Actually Happen?
 
----
+This is the most important part of the architecture.
 
-# 11. Launch Jenkins EC2
+The application traffic path is:
 
-Create:
+User
+  │
+  ▼
+Route 53
+  │
+  ▼
+AWS Application Load Balancer
+  │
+  ▼
+AWS Load Balancer Controller
+  │
+  ▼
+Kubernetes Gateway
+  │
+  ▼
+HTTPRoute
+  │
+  ▼
+Kubernetes Service
+  │
+  ▼
+Target Group
+  │
+  ▼
+Pod IP
+  │
+  ▼
+Application Container
+  │
+  ▼
+Response
 
-```text
-Name:       jenkins-server
-AMI:        Amazon Linux
-Type:       c7i-flex.large
-Key pair:   demo.pem
-VPC:        devsecops-vpc
-Subnet:     devsecops-private-subnet-1a
-SG:         jenkins-sg
-Storage:    20 GB
-```
+The deployment workflow does not directly modify Route 53 or manually move ALB target groups.
 
-Jenkins is deliberately placed in the private subnet.
+The CD workflow changes the Kubernetes HTTPRoute.
 
----
+The Kubernetes Gateway API configuration is the desired routing state.
 
-# 12. Connect to Bastion
+The AWS Load Balancer Controller observes the Kubernetes Gateway/HTTPRoute resources and reconciles the AWS load balancer configuration.
 
-From Windows:
+🌐 Complete End-to-End User Request Flow
 
-```bash
-ssh -i demo.pem ec2-user@<BASTION_PUBLIC_IP>
-```
+Step 1 — User Request
 
-Become root:
+A user accesses the application:
 
-```bash
-sudo su -
-```
+https://your-domain.example.com
 
-Set hostname:
+The request enters:
 
-```bash
-hostnamectl set-hostname bastion
-```
+User
+  │
+  ▼
+Internet
 
----
+Step 2 — Route 53
 
-# 13. Install Bastion Tools
+Route 53 provides DNS resolution.
 
-## 13.1 Git and Docker
+Conceptually:
 
-```bash
-dnf install -y git docker
+your-domain.example.com
+          │
+          ▼
+       Route 53
+          │
+          ▼
+ALB DNS endpoint
 
-git --version
-docker version
+Route 53's responsibility is DNS resolution.
 
-systemctl enable docker
-systemctl start docker
-systemctl status docker
-```
+It does not perform the blue-green application deployment switch in this architecture.
 
-## 13.2 MariaDB Client
+⚖️ Step 3 — Application Load Balancer
 
-This is used to test connectivity to RDS MySQL.
+The request reaches the AWS Application Load Balancer.
 
-```bash
-dnf install -y mariadb105
-mysql --version
-```
+Route 53
+    │
+    ▼
+AWS ALB
 
----
+The ALB is the external load-balancing entry point.
 
-# 14. Install kubectl on Bastion
+The AWS Load Balancer Controller manages the AWS load-balancer configuration based on Kubernetes resources.
 
-```bash
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+🎛️ Step 4 — AWS Load Balancer Controller
 
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+Inside the EKS cluster:
 
-chmod +x kubectl
+Kubernetes Resources
+        │
+        ▼
+AWS Load Balancer Controller
+        │
+        ▼
+AWS Load Balancer configuration
 
-mkdir -p ~/.local/bin
+The controller watches Kubernetes networking resources and reconciles the corresponding AWS infrastructure.
 
-mv ./kubectl ~/.local/bin/kubectl
+This creates the bridge between:
 
-kubectl version --client
-```
+Kubernetes Gateway API
 
----
+and:
 
-# 15. Install eksctl on Bastion
+AWS Application Load Balancer
 
-```bash
-ARCH=amd64
-PLATFORM=$(uname -s)_$ARCH
+🚪 Step 5 — Gateway
 
-curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
-```
+The Kubernetes Gateway represents the entry point for application traffic inside the Kubernetes networking model.
 
-Optional checksum verification:
+Conceptually:
 
-```bash
-curl -sL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_checksums.txt" \
-  | grep $PLATFORM \
-  | sha256sum --check
-```
+ALB
+ │
+ ▼
+Gateway
+ │
+ ▼
+HTTPRoute
 
-Install:
+The Gateway defines the listener/entry point.
 
-```bash
-tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp
+The HTTPRoute defines how application requests are routed.
 
-rm eksctl_$PLATFORM.tar.gz
+🛣️ Step 6 — HTTPRoute
 
-sudo install -m 0755 /tmp/eksctl /usr/local/bin
+This is where the blue-green application traffic decision is expressed.
 
-rm /tmp/eksctl
+Example:
 
-eksctl version
-```
+backendRefs:
+  - name: frontend-blue
+    namespace: devsecops-blue
+    port: 80
+    weight: 100
 
----
+This means the route sends:
 
-# 16. Create IAM Role for Bastion
+frontend traffic
+       │
+       ▼
+frontend-blue
+       │
+      100%
 
-Before creating the EKS cluster from Bastion:
+After the blue-green switch:
 
-1. Create an IAM role named something such as:
-   `iam-role-ec2`
-2. Trust entity:
-   `EC2`
-3. Attach the required administrative permissions.
+backendRefs:
+  - name: frontend-green
+    namespace: devsecops-green
+    port: 80
+    weight: 100
 
-For a learning/lab environment, the original setup used `AdministratorAccess`.
+Now:
 
-**For production, do not give Bastion AdministratorAccess. Use least-privilege IAM policies instead.**
+frontend traffic
+       │
+       ▼
+frontend-green
+       │
+      100%
 
-Attach this IAM role to the Bastion EC2 instance.
+🎯 The Exact Traffic Switch Point
 
-Verify:
+The logical application traffic switch in this implementation happens at the Kubernetes HTTPRoute backend reference.
 
-```bash
-aws sts get-caller-identity
-```
+Before:
 
----
+HTTPRoute
+   │
+   ▼
+frontend-blue
+   │
+ 100%
 
-# 17. Clone the Project Repository
+After:
 
-From Bastion:
+HTTPRoute
+   │
+   ▼
+frontend-green
+   │
+ 100%
 
-```bash
-cd /opt
+The CD workflow performs this by patching the HTTPRoute.
 
-git clone <GITHUB_REPOSITORY>
+For all four application routes:
 
-cd devsecops-project
-```
+frontend-route
+user-route
+product-route
+order-route
 
-Example repository structure:
+the workflow replaces the backend reference with the new environment and sets:
 
-```text
-devsecops-project/
-├── Jenkinsfile
-├── README.md
+weight = 100
+
+So the production transition is:
+
+OLD ENVIRONMENT
+      │
+      │ 100%
+      ▼
+    BLUE
+
+        SWITCH
+
+    GREEN
+      │
+      │ 100%
+      ▼
+NEW ENVIRONMENT
+
+🎯 What About Target Groups?
+
+The important distinction is:
+
+The GitHub Actions CD workflow does not directly switch AWS Target Groups.
+
+The CD workflow changes:
+
+Kubernetes HTTPRoute
+
+Then the networking controller reconciles the desired Kubernetes state into the AWS load-balancer configuration.
+
+Conceptually:
+
+GitHub Actions
+      │
+      │ kubectl patch HTTPRoute
+      ▼
+Kubernetes HTTPRoute
+      │
+      ▼
+Gateway API state
+      │
+      ▼
+AWS Load Balancer Controller
+      │
+      ▼
+AWS ALB configuration
+      │
+      ▼
+Target Groups / routing
+
+The exact AWS target-group structure depends on the Gateway implementation and controller configuration. Therefore, the safe architectural statement is:
+
+HTTPRoute is the Kubernetes-level routing control; AWS Load Balancer Controller translates/reconciles the Kubernetes networking state into the AWS load-balancer configuration, including the required backend target configuration.
+
+🎯 How Do Target Groups Reach Pod IPs?
+
+At the backend, Kubernetes provides the service abstraction.
+
+Conceptually:
+
+HTTPRoute
+    │
+    ▼
+Kubernetes Service
+    │
+    ▼
+Service endpoints
+    │
+    ▼
+Pod IPs
+
+With AWS load balancing, the AWS load balancer can use pod IPs as targets when configured with the appropriate target type.
+
+The conceptual relationship is:
+
+Kubernetes Service
+       │
+       ▼
+EndpointSlice
+       │
+       ▼
+Pod IP
+       │
+       ▼
+AWS Target Group
+       │
+       ▼
+ALB
+
+For example:
+
+frontend-green Service
+        │
+        ├── Pod IP 10.x.x.21
+        ├── Pod IP 10.x.x.22
+        └── Pod IP 10.x.x.23
+
+The target registration/reconciliation is handled by Kubernetes/AWS integration components rather than by the GitHub Actions deployment script itself.
+
+🔄 Full Request-to-Response Flow
+
+The complete production request path can be visualized as:
+
+                         USER
+                          │
+                          │ HTTPS Request
+                          ▼
+                     ┌──────────┐
+                     │ Route 53 │
+                     └────┬─────┘
+                          │
+                          │ DNS
+                          ▼
+              ┌──────────────────────┐
+              │ Application Load     │
+              │ Balancer (AWS ALB)   │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ AWS Load Balancer    │
+              │ Controller           │
+              │                      │
+              │ Reconciles AWS with  │
+              │ Kubernetes Gateway   │
+              │ configuration        │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ Kubernetes Gateway   │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ HTTPRoute            │
+              │                      │
+              │ BLUE 100%             │
+              │       OR              │
+              │ GREEN 100%            │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ Kubernetes Service   │
+              └──────────┬───────────┘
+                         │
+                         ▼
+              ┌──────────────────────┐
+              │ EndpointSlice /      │
+              │ Pod endpoints        │
+              └──────────┬───────────┘
+                         │
+                         ▼
+                  ┌──────────────┐
+                  │   Pod IP     │
+                  │              │
+                  │ Application  │
+                  └──────┬───────┘
+                         │
+                         │ Response
+                         ▼
+                     ALB → User
+
+🔁 What Changes During a Blue-Green Deployment?
+
+Suppose the current production environment is GREEN.
+
+Before deployment
+
+                     HTTPRoute
+                         │
+                         ▼
+                 GREEN Service
+                         │
+                     100% traffic
+                         │
+                         ▼
+                    GREEN Pods
+
+BLUE is running separately but receives no production traffic.
+
+BLUE Pods
+   │
+   └── 0% production traffic
+
+During deployment
+
+The new release is deployed to BLUE.
+
+                    PRODUCTION
+                        │
+                        ▼
+                     GREEN
+                      100%
+                        │
+                        ▼
+                   GREEN Pods
+
+
+                     BLUE
+                       │
+                       │ new version
+                       ▼
+                  BLUE Pods
+
+Production traffic remains on GREEN.
+
+After candidate validation
+
+CD patches the HTTPRoutes.
+
+BEFORE:
+
+HTTPRoute
+   │
+   └── GREEN = 100%
+
+
+AFTER:
+
+HTTPRoute
+   │
+   └── BLUE = 100%
+
+Now:
+
+GREEN = 0%
+BLUE  = 100%
+
+🚨 Automatic Rollback
+
+The deployment contains a rollback path for failed final production verification.
+
+Example:
+
+Before:
+
+GREEN = 100%
+BLUE  = 0%
+
+New version:
+
+BLUE candidate = healthy
+
+Traffic switch:
+
+GREEN = 0%
+BLUE  = 100%
+
+Final production verification fails:
+
+ERROR
+  │
+  ▼
+Rollback
+  │
+  ▼
+HTTPRoutes restored
+  │
+  ▼
+GREEN = 100%
+BLUE  = 0%
+
+🧯 Rollback Flow
+
+                 100% SWITCH
+                      │
+                      ▼
+             New environment
+                becomes active
+                      │
+                      ▼
+             Final verification
+                      │
+               ┌──────┴──────┐
+               │             │
+             PASS          FAIL
+               │             │
+               ▼             ▼
+             DONE         ROLLBACK
+                              │
+                              ▼
+                    Restore old HTTPRoutes
+                              │
+                              ▼
+                       OLD ENV = 100%
+                              │
+                              ▼
+                         Production
+
+The previous environment remains available because blue and green are maintained separately.
+
+🔐 Why Keep the Old Environment Running?
+
+The inactive environment is not immediately destroyed after a release.
+
+This is important because:
+
+OLD ENVIRONMENT
+       │
+       └── remains available
+
+If the new environment has a problem:
+
+Production
+    │
+    ▼
+New environment
+    │
+    X
+    │
+    ▼
+Old environment
+   100%
+
+This allows a fast traffic rollback without rebuilding the old release.
+
+🔒 Production Safety Controls
+
+The CD workflow includes several safeguards.
+
+1. CI must succeed
+
+CI FAIL
+  │
+  X
+No production deployment
+
+2. Main push only
+
+CD only continues for a successful CI run caused by a push to main.
+
+3. Active environment detection
+
+The workflow determines:
+
+ACTIVE
+INACTIVE
+
+before deploying.
+
+4. Route consistency validation
+
+All four application routes must agree on the active environment.
+
+5. Candidate rollout validation
+
+All candidate deployments must become ready.
+
+6. Image SHA validation
+
+The candidate must use the exact image generated by CI.
+
+7. Traffic verification
+
+After the switch:
+
+Expected environment = new environment
+Expected traffic      = 100%
+
+8. Production verification
+
+The active deployments must:
+
+run expected image
+have expected replicas ready
+
+9. Automatic rollback
+
+If final verification fails after the switch, the previous environment is restored.
+
+10. Deployment concurrency protection
+
+The workflow uses:
+
+concurrency:
+  group: production-blue-green
+  cancel-in-progress: false
+
+This prevents multiple production blue-green workflows from modifying production traffic state simultaneously.
+
+📊 Current Traffic Model
+
+The current project uses:
+
+                 BLUE-GREEN
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+       ACTIVE                INACTIVE
+          │                     │
+        100%                    0%
+
+After deployment:
+
+                 BLUE-GREEN
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+       OLD ENV              NEW ENV
+          │                     │
+         0%                    100%
+
+This is not a gradual canary strategy.
+
+There is no:
+
+90/10
+75/25
+50/50
+25/75
+
+traffic progression in the current CD implementation.
+
+🧠 Blue-Green vs Canary in This Project
+
+Feature
+
+Current Implementation
+
+Two production environments
+
+✅
+
+Blue environment
+
+✅
+
+Green environment
+
+✅
+
+New release deployed before switch
+
+✅
+
+Direct 100% switch
+
+✅
+
+Gradual traffic increase
+
+❌
+
+Canary percentages
+
+❌
+
+Candidate validation before switch
+
+✅
+
+Automatic rollback
+
+✅
+
+The architecture can be extended to weighted/canary traffic later, but the current implementation intentionally keeps production traffic switching simple:
+
+100% OLD
+   ↓
+100% NEW
+
+🗂️ Kubernetes Traffic Model
+
+The production namespace contains the HTTPRoutes:
+
+devsecops
+│
+├── frontend-route
+├── user-route
+├── product-route
+└── order-route
+
+They point to services in the blue or green namespaces.
+
+Example:
+
+frontend-route
+      │
+      ▼
+frontend-green
+      │
+      ▼
+devsecops-green
+      │
+      ▼
+GREEN frontend pods
+
+The same model applies to:
+
+user-service
+product-service
+order-service
+
+🧬 Release Traceability
+
+Every release can be traced through the complete chain:
+
+Git Commit SHA
+      │
+      ▼
+GitHub Actions CI
+      │
+      ▼
+Docker Image SHA Tag
+      │
+      ▼
+Amazon ECR
+      │
+      ▼
+GitHub Actions CD
+      │
+      ▼
+Inactive EKS Environment
+      │
+      ▼
+HTTPRoute
+      │
+      ▼
+Production
+
+For example:
+
+commit abc123
+     │
+     ├── user-service:abc123
+     ├── product-service:abc123
+     ├── order-service:abc123
+     └── frontend:abc123
+              │
+              ▼
+       ECR
+              │
+              ▼
+       EKS BLUE/GREEN
+
+This makes production releases auditable and reproducible.
+
+🔐 Security Architecture
+
+Developer
+    │
+    ▼
+GitHub
+    │
+    ▼
+Gitleaks
+    │
+    ▼
+Docker Build
+    │
+    ▼
+Trivy
+    │
+    ▼
+GitHub OIDC
+    │
+    ▼
+AWS IAM
+    │
+    ▼
+Amazon ECR
+    │
+    ▼
+Amazon EKS
+
+Security is integrated directly into the CI pipeline instead of being treated as a separate post-deployment activity.
+
+☁️ AWS Architecture
+
+AWS
+│
+├── ap-south-1
+│
+├── IAM
+│   └── GitHubActions-DevSecOps-Production
+│
+├── Amazon ECR
+│   ├── devsecops-user-service
+│   ├── devsecops-product-service
+│   ├── devsecops-order-service
+│   └── devsecops-frontend
+│
+├── Amazon EKS
+│   └── devsecops-eks
+│       │
+│       ├── Gateway
+│       ├── HTTPRoutes
+│       │
+│       ├── devsecops-blue
+│       │   ├── frontend
+│       │   ├── user-service
+│       │   ├── product-service
+│       │   └── order-service
+│       │
+│       └── devsecops-green
+│           ├── frontend
+│           ├── user-service
+│           ├── product-service
+│           └── order-service
+│
+└── Application Load Balancer
+
+📁 Repository Structure
+
+devsecops-production-platform/
+│
+├── .github/
+│   └── workflows/
+│       ├── ci.yml
+│       └── deploy-blue-green.yml
+│
+├── frontend/
+│
+├── user-service/
+│
+├── product-service/
+│
+├── order-service/
+│
+├── k8s/
+│
+├── mysql/
+│
+├── docker-compose.yml
 ├── eksctl-config.yaml
 ├── iam_policy.json
-├── cluster-autoscaler-policy.json
-├── loki-s3-policy.json
-├── loki-pod-identity-trust.json
-├── ebs-csi-trust.json
-├── tempo-s3-policy.json
-├── tempo-pod-identity-trust.json
-├── k8s/
-├── frontend/
-├── user-service/
-├── product-service/
-├── order-service/
-└── mysql/
-```
+└── README.md
+
+⚙️ CI Workflow
+
+.github/workflows/ci.yml
+
+Responsibilities:
+
+✓ Build Java services
+✓ Run tests
+✓ Detect secrets with Gitleaks
+✓ Build Docker images
+✓ Scan images with Trivy
+✓ Authenticate to AWS using OIDC
+✓ Push images to ECR
+
+⚙️ CD Workflow
+
+.github/workflows/deploy-blue-green.yml
+
+Responsibilities:
+
+✓ Wait for successful CI
+✓ Confirm main branch push
+✓ Detect active environment
+✓ Identify inactive environment
+✓ Deploy release to inactive environment
+✓ Wait for rollout
+✓ Validate replicas
+✓ Validate image SHA
+✓ Switch HTTPRoutes to new environment
+✓ Set production traffic to 100%
+✓ Verify production
+✓ Roll back to previous environment when final verification fails
+
+🔬 End-to-End Deployment Example
+
+Assume the current state is:
+
+GREEN = ACTIVE
+BLUE  = INACTIVE
+
+A developer runs:
+
+git push origin main
+
+CI
+
+main
+ │
+ ▼
+Build & Test
+ │
+ ▼
+Gitleaks
+ │
+ ▼
+Docker Build
+ │
+ ▼
+Trivy
+ │
+ ▼
+OIDC → AWS
+ │
+ ▼
+ECR Push
+ │
+ ▼
+CI SUCCESS
+
+CD
+
+Detect:
+
+ACTIVE   = GREEN
+INACTIVE = BLUE
+
+Deploy:
+
+new SHA → BLUE
+
+Validate:
+
+BLUE replicas      = READY
+BLUE image         = expected SHA
+BLUE deployments   = healthy
+
+Traffic before switch:
+
+GREEN = 100%
+BLUE  = 0%
+
+Switch:
+
+HTTPRoute
+   │
+   ▼
+BLUE = 100%
+
+Traffic after switch:
+
+GREEN = 0%
+BLUE  = 100%
+
+Final verification:
+
+BLUE image SHA correct
+BLUE replicas ready
+HTTPRoutes → BLUE
+Traffic → 100%
+
+Release complete.
+
+🔁 Next Deployment
+
+On the next release:
+
+BLUE  = ACTIVE
+GREEN = INACTIVE
+
+The new release is deployed to GREEN:
+
+new SHA → GREEN
+
+After validation:
+
+BLUE  = 0%
+GREEN = 100%
+
+Therefore the deployment cycle continuously alternates:
+
+Release 1
+GREEN → BLUE
+
+Release 2
+BLUE → GREEN
+
+Release 3
+GREEN → BLUE
+
+Release 4
+BLUE → GREEN
+
+🏁 Final Architecture Summary
+
+The complete production delivery chain is:
+
+                         SOURCE
+                           │
+                           ▼
+                    GitHub main branch
+                           │
+                           ▼
+                    GitHub Actions CI
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+          ▼                ▼                ▼
+      Build/Test       Gitleaks          Docker
+                                           │
+                                           ▼
+                                         Trivy
+                                           │
+                                           ▼
+                                    GitHub OIDC → AWS
+                                           │
+                                           ▼
+                                      Amazon ECR
+                                           │
+                                           ▼
+                              GitHub Actions CD
+                                           │
+                              ┌────────────┴────────────┐
+                              │                         │
+                              ▼                         ▼
+                       ACTIVE ENV                 INACTIVE ENV
+                              │                         │
+                              │                    New release
+                              │                         │
+                              │                    Rollout check
+                              │                         │
+                              │                    Image check
+                              │                         │
+                              └────────────┬────────────┘
+                                           │
+                                      Candidate Ready
+                                           │
+                                           ▼
+                                  HTTPRoute PATCH
+                                           │
+                                           ▼
+                                    100% traffic
+                                           │
+                                           ▼
+                              AWS LB Controller
+                                           │
+                                           ▼
+                                  AWS ALB / Targets
+                                           │
+                                           ▼
+                                  Kubernetes Service
+                                           │
+                                           ▼
+                                      Pod IPs
+                                           │
+                                           ▼
+                                    Application
+                                           │
+                                           ▼
+                                      RESPONSE
+
+🎯 Core Principle
+
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│   BUILD → TEST → SCAN → PACKAGE → DEPLOY → VALIDATE     │
+│                                                          │
+│                     ↓                                    │
+│                                                          │
+│              SWITCH TRAFFIC 100%                         │
+│                                                          │
+│                     ↓                                    │
+│                                                          │
+│                VERIFY PRODUCTION                         │
+│                                                          │
+│                     ↓                                    │
+│                                                          │
+│             FAILURE → AUTOMATIC ROLLBACK                 │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+
+This project demonstrates a complete DevSecOps production workflow where security, immutable artifacts, Kubernetes deployment validation, blue-green environments, controlled traffic switching, production verification, and rollback are integrated into a single automated delivery process.
+
+👨‍💻 Project Focus
+
+The platform demonstrates practical implementation of:
+
+DevSecOps CI/CD
+
+GitHub Actions
+
+AWS EKS
+
+Amazon ECR
+
+GitHub OIDC
+
+Docker
+
+Maven / Java 21
+
+Gitleaks
+
+Trivy
+
+Kubernetes Gateway API
+
+Gateway / HTTPRoute
+
+AWS Load Balancer Controller
+
+Application Load Balancer
+
+Blue-Green Deployment
+
+Immutable SHA-based Releases
+
+100% Production Traffic Switching
+
+Production Validation
+
+Automatic Rollback
+
+End-to-End Request Routing
+
+Deployment strategy: Blue-Green with direct 100% traffic switching.
+Canary/gradual traffic shifting is intentionally not part of the current implementation.
+
+==========================================================================================
+
+
+
+
+# AWS ALB Controller + Gateway API + Blue-Green Traffic Switching
+
+## Overview
+
+This document explains how **AWS Load Balancer Controller**, **Kubernetes Gateway API**, **GatewayClass**, **Gateway**, **HTTPRoute**, **TargetGroupConfiguration (TGC)**, **TargetGroupBinding (TGB)**, Kubernetes Services, EndpointSlices, AWS ALB Target Groups, and Pod IPs work together in a blue-green deployment.
+
+It also explains exactly what happens when the **GitHub Actions CD pipeline switches production traffic from Blue to Green**.
 
 ---
 
-# 18. Create EKS Cluster
+# 1. Complete Production Traffic Flow
 
-Edit:
-
-```bash
-vi eksctl-config.yaml
-```
-
-Update:
-
-- VPC ID
-- Private subnet IDs
-- Any account-specific values
-
-Create cluster:
-
-```bash
-eksctl create cluster -f eksctl-config.yaml
-```
-
-To delete the cluster later:
-
-```bash
-eksctl delete cluster -f eksctl-config.yaml
-```
-
-Verify:
-
-```bash
-eksctl get cluster --region ap-south-1
-
-aws eks list-nodegroups \
-  --cluster-name devsecops-eks \
-  --region ap-south-1
-```
-
-Configure kubectl:
-
-```bash
-aws eks update-kubeconfig \
-  --name devsecops-eks \
-  --region ap-south-1
-```
-
-Verify:
-
-```bash
-kubectl get nodes
-kubectl get pods
-kubectl get ns
-```
-
----
-
-# 19. Create Amazon ECR Repositories
-
-Create four repositories:
+The complete request path is:
 
 ```text
-devsecops-frontend
-devsecops-order-service
-devsecops-product-service
-devsecops-user-service
+                         INTERNET
+                            |
+                            v
+                    +----------------+
+                    |    Route 53    |
+                    | DNS / Domain   |
+                    +-------+--------+
+                            |
+                            | DNS
+                            v
+                 +-----------------------+
+                 |     AWS ALB           |
+                 | Application LB        |
+                 +----------+------------+
+                            |
+                            | Listener :80/:443
+                            v
+                 +-----------------------+
+                 | ALB Listener Rules    |
+                 | created/managed by    |
+                 | AWS Load Balancer     |
+                 | Controller            |
+                 +----------+------------+
+                            |
+                            | HTTP host/path
+                            v
+                 +-----------------------+
+                 |      HTTPRoute        |
+                 | Kubernetes Gateway API |
+                 +----------+------------+
+                            |
+                    backendRefs
+                            |
+                +-----------+-----------+
+                |                       |
+                v                       v
+        user-service-blue       user-service-green
+        Service                 Service
+                |                       |
+                v                       v
+        Target Group Blue       Target Group Green
+                |                       |
+                v                       v
+          Pod IPs Blue           Pod IPs Green
 ```
 
-After creation, update all image repository URIs in:
+The key point is that **HTTPRoute is the Kubernetes traffic-routing intent**, while the **AWS Load Balancer Controller converts that intent into AWS ALB configuration**.
 
-- `kustomization.yaml`
-- frontend deployment manifests
-- user-service deployment manifests
-- product-service deployment manifests
-- order-service deployment manifests
+The controller continuously reconciles Kubernetes Gateway API objects with AWS resources.
 
-Do not hard-code an old account ID.
+---
 
-Use:
+# 2. The Components and Their Responsibilities
+
+## 2.1 Route 53
+
+Route 53 is responsible for DNS.
+
+For example:
 
 ```text
-<AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com/<repository>
+api.example.com
+      |
+      v
+Route 53
+      |
+      v
+ALB DNS name
 ```
 
-Test ECR access:
+Route 53 does **not** know about:
 
-```bash
-aws ecr get-login-password --region ap-south-1 \
-  | docker login \
-  --username AWS \
-  --password-stdin <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com
-```
+* Kubernetes Pods
+* Services
+* HTTPRoutes
+* TargetGroups
+* Blue/Green namespaces
 
----
-
-# 20. Create Amazon RDS MySQL
-
-Create a DB subnet group:
-
-```text
-devsecops-subnet-group
-```
-
-Use:
+It simply resolves:
 
 ```text
-devsecops-data-subnet-1a
-devsecops-data-subnet-1b
+api.example.com
+        ↓
+<ALB DNS name>
 ```
 
-Create RDS:
+After DNS resolution, the request goes to the ALB.
+
+Therefore:
+
+> **Blue/Green switching does NOT normally happen in Route 53.**
+
+The DNS record continues pointing to the same ALB.
+
+The traffic switch happens **inside the ALB routing configuration**, driven by the Kubernetes `HTTPRoute`.
+
+---
+
+# 3. AWS Application Load Balancer
+
+The AWS ALB is the Layer 7 entry point.
+
+It understands:
+
+* HTTP
+* HTTPS
+* Host headers
+* Paths
+* Listener rules
+* Target Groups
+* Health checks
+
+For example:
 
 ```text
-Identifier: devsecops-mysql
-Engine: MySQL
-Username: admin
-Password: <RDS_PASSWORD>
-Database name: devsecops_mysql
-Storage: default
-Subnet group: devsecops-subnet-group
-Security group: devsecops-rds-sg
+https://api.example.com/users
+
+             |
+             v
+
+             ALB
+              |
+              v
+       HTTPS Listener :443
+              |
+              v
+       Listener Rule
+       Host = api.example.com
+       Path = /users
+              |
+              v
+       Target Group
+              |
+              v
+        Pod IP:Port
 ```
 
-Do not expose the RDS instance publicly.
+With Gateway API, you don't manually create those listener rules every time.
+
+The AWS Load Balancer Controller derives them from Kubernetes Gateway API resources.
+
+AWS documents that L7 `HTTPRoute` resources are implemented using an ALB.
 
 ---
 
-# 21. Test RDS Connectivity from Bastion
+# 4. AWS Load Balancer Controller
 
-```bash
-mysql -h <RDS_ENDPOINT> \
-  -P 3306 \
-  -u admin \
-  -p
-```
-
-Enter the RDS password.
-
-Create application databases:
-
-```sql
-SHOW DATABASES;
-
-CREATE DATABASE IF NOT EXISTS userdb;
-CREATE DATABASE IF NOT EXISTS productdb;
-CREATE DATABASE IF NOT EXISTS orderdb;
-
-SHOW DATABASES;
-
-EXIT;
-```
-
----
-
-# 22. Copy SSH Key to Bastion
-
-From the Windows local machine:
-
-```bash
-scp -i demo.pem demo.pem \
-  ec2-user@<BASTION_PUBLIC_IP>:/home/ec2-user/
-```
-
-Connect to Bastion:
-
-```bash
-ssh -i demo.pem ec2-user@<BASTION_PUBLIC_IP>
-```
-
-Then:
-
-```bash
-chmod 400 demo.pem
-```
-
-Use the Bastion to SSH into Jenkins:
-
-```bash
-ssh -i demo.pem ec2-user@<JENKINS_PRIVATE_IP>
-```
-
----
-
-# 23. Configure Jenkins Server
-
-Become root:
-
-```bash
-sudo su -
-```
-
-Set hostname:
-
-```bash
-hostnamectl set-hostname Jenkins
-```
-
----
-
-# 24. Install Jenkins Dependencies
-
-Update packages:
-
-```bash
-dnf update -y
-```
-
-Install Git and Docker:
-
-```bash
-dnf install -y git docker
-
-git --version
-docker version
-```
-
-Enable Docker:
-
-```bash
-systemctl enable docker
-systemctl start docker
-systemctl status docker
-```
-
----
-
-# 25. Install Java 21
-
-```bash
-dnf install -y java-21-amazon-corretto-devel
-
-java -version
-javac -version
-```
-
-Configure Java:
-
-```bash
-tee /etc/profile.d/java.sh > /dev/null <<'EOF'
-export JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto.x86_64
-export PATH=$JAVA_HOME/bin:$PATH
-EOF
-```
-
-Set permissions:
-
-```bash
-chmod 644 /etc/profile.d/java.sh
-
-source /etc/profile.d/java.sh
-```
-
-Verify:
-
-```bash
-echo $JAVA_HOME
-java -version
-```
-
----
-
-# 26. Install Maven
-
-```bash
-dnf install -y maven
-
-mvn -version
-```
-
----
-
-# 27. Install Jenkins
-
-Add repository:
-
-```bash
-sudo wget -O /etc/yum.repos.d/jenkins.repo \
-  https://pkg.jenkins.io/rpm-stable/jenkins.repo
-```
-
-Import key:
-
-```bash
-sudo rpm --import \
-  https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
-```
-
-Install:
-
-```bash
-sudo dnf install -y jenkins
-
-rpm -q jenkins
-```
-
-Enable and start:
-
-```bash
-sudo systemctl enable jenkins
-sudo systemctl start jenkins
-sudo systemctl status jenkins
-```
-
-Troubleshooting:
-
-```bash
-sudo journalctl -u jenkins -n 100 --no-pager
-sudo ss -lntp | grep 8080
-```
-
----
-
-# 28. Allow Jenkins to Use Docker
-
-```bash
-sudo usermod -aG docker jenkins
-```
-
-Restart Jenkins after changing group membership.
-
----
-
-# 29. Configure Jenkins Java Environment
-
-```bash
-systemctl edit jenkins
-```
-
-Add:
-
-```ini
-[Service]
-Environment="JAVA_HOME=/usr/lib/jvm/java-21-amazon-corretto.x86_64"
-Environment="PATH=/usr/lib/jvm/java-21-amazon-corretto.x86_64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
-```
-
-Then:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart jenkins
-```
-
-Verify:
-
-```bash
-sudo systemctl status jenkins
-```
-
----
-
-# 30. Prepare Trivy Directories
-
-```bash
-mkdir -p /var/lib/trivy /var/lib/trivy-tmp
-
-chown -R jenkins:jenkins /var/lib/trivy /var/lib/trivy-tmp
-
-chmod 755 /var/lib/trivy /var/lib/trivy-tmp
-
-ls -ld /var/lib/trivy /var/lib/trivy-tmp
-```
-
----
-
-# 31. Install SonarQube
-
-Create persistent Docker volumes:
-
-```bash
-docker volume create sonarqube_data
-docker volume create sonarqube_extensions
-docker volume create sonarqube_logs
-```
-
-Run SonarQube:
-
-```bash
-docker run -d \
-  --name sonarqube \
-  --restart unless-stopped \
-  -p 9000:9000 \
-  -v sonarqube_data:/opt/sonarqube/data \
-  -v sonarqube_extensions:/opt/sonarqube/extensions \
-  -v sonarqube_logs:/opt/sonarqube/logs \
-  sonarqube:lts-community
-```
-
-Verify:
-
-```bash
-docker ps
-
-curl http://localhost:9000/api/system/status
-```
-
----
-
-# 32. Access Jenkins and SonarQube from Windows
-
-Because Jenkins is private, use the Bastion as the SSH tunnel endpoint.
-
-From Windows:
-
-```bash
-ssh -i demo.pem \
-  -L 8080:<JENKINS_PRIVATE_IP>:8080 \
-  -L 9000:<JENKINS_PRIVATE_IP>:9000 \
-  ec2-user@<BASTION_PUBLIC_IP>
-```
-
-Keep this terminal open.
-
-Then open:
+The **AWS Load Balancer Controller (ALBC)** is the reconciliation engine connecting:
 
 ```text
-http://localhost:8080
-http://localhost:9000
+Kubernetes
+    |
+    | Desired state
+    v
+AWS Load Balancer Controller
+    |
+    | AWS APIs
+    v
+AWS
 ```
 
----
-
-# 33. Initialize Jenkins
-
-On Jenkins server:
-
-```bash
-cat /var/lib/jenkins/secrets/initialAdminPassword
-```
-
-Use that password for the initial Jenkins setup.
-
-Create a Jenkins administrator username and password.
-
----
-
-# 34. Configure SonarQube
-
-Initial login:
+It watches Kubernetes resources such as:
 
 ```text
-Username: admin
-Password: admin
+GatewayClass
+Gateway
+HTTPRoute
+Service
+EndpointSlice
+TargetGroupConfiguration
+TargetGroupBinding
 ```
 
-Immediately change the default password.
-
-Create a SonarQube token:
+and reconciles AWS resources such as:
 
 ```text
-Administration
-  -> Security
-  -> Users
-  -> Generate Token
+ALB
+Listeners
+Listener Rules
+Target Groups
+Target Registrations
+Security Groups
 ```
 
-Use a name such as:
+The controller runs continuously.
+
+It is not a one-time deployment script.
+
+Conceptually:
 
 ```text
-jenkins-token
+Kubernetes Desired State
+          |
+          v
++-------------------------+
+| AWS Load Balancer       |
+| Controller              |
+|                         |
+| Observe                 |
+| Compare                 |
+| Reconcile               |
++------------+------------+
+             |
+             v
+      AWS Actual State
 ```
 
-Store the token securely.
-
----
-
-# 35. Configure SonarQube Webhook
-
-In SonarQube:
+If Kubernetes says:
 
 ```text
-Administration
-  -> Configuration
-  -> Webhooks
+HTTPRoute → green
 ```
 
-Create:
+but ALB currently routes to:
 
 ```text
-Name: jenkins-webhook
-URL: http://<JENKINS_PRIVATE_IP>:8080/sonarqube-webhook/
+blue
 ```
 
-The webhook lets SonarQube notify Jenkins when analysis is complete.
+the controller detects the difference and updates the ALB.
 
 ---
 
-# 36. Install Jenkins Plugins
+# 5. Gateway API
 
-Install:
+Gateway API is the Kubernetes-native API model for expressing traffic management.
 
-- Pipeline: Stage View
-- Maven Integration
-- SonarQube Scanner
+Instead of putting everything into one large Ingress object, responsibilities are separated.
 
-Install any additional plugin required by the Jenkinsfile, especially:
-
-- Git
-- Credentials Binding
-- Pipeline
-- Docker Pipeline, if used by the Jenkinsfile
-
----
-
-# 37. Configure GitHub SSH Access for Jenkins
-
-Switch to the Jenkins user:
-
-```bash
-sudo usermod -s /bin/bash jenkins
-
-sudo -iu jenkins
-```
-
-Generate an SSH key:
-
-```bash
-ssh-keygen -t ed25519 -C "jenkins-devsecops"
-```
-
-Show public key:
-
-```bash
-cat ~/.ssh/id_ed25519.pub
-```
-
-Add the public key to the GitHub repository:
+The important resources are:
 
 ```text
-Repository
-  -> Settings
-  -> Deploy keys
-  -> Add deploy key
+GatewayClass
+      |
+      v
+Gateway
+      |
+      v
+HTTPRoute
+      |
+      v
+Service
+      |
+      v
+Pods
 ```
 
-Use the private key in Jenkins credentials.
+This separation is one of the biggest advantages of Gateway API.
 
 ---
 
-# 38. Add GitHub Credential to Jenkins
+# 6. GatewayClass
 
-In Jenkins:
+`GatewayClass` defines:
+
+> **Which controller is responsible for managing this Gateway?**
+
+Example:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: alb
+spec:
+  controllerName: gateway.k8s.aws/alb
+```
+
+The important field is:
+
+```yaml
+controllerName: gateway.k8s.aws/alb
+```
+
+This tells the AWS Load Balancer Controller:
 
 ```text
-Manage Jenkins
-  -> Credentials
-  -> Global credentials
+"This GatewayClass belongs to me."
 ```
 
-Create:
+Therefore:
 
 ```text
-Type: SSH Username with private key
-ID: github-ssh
-Username: <GITHUB_USERNAME>
-Private Key: contents of ~/.ssh/id_ed25519
+GatewayClass
+     |
+     | controllerName
+     v
+AWS Load Balancer Controller
 ```
 
-Also create a Secret Text credential:
+For ALB Gateway API support, the AWS controller manages `GatewayClass` objects using the `gateway.k8s.aws/alb` controller name.
+
+---
+
+# 7. Gateway
+
+A `Gateway` represents the actual traffic entry point.
+
+Example:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: devsecops-gateway
+  namespace: devsecops
+spec:
+  gatewayClassName: alb
+
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.example.com"
+```
+
+Conceptually:
 
 ```text
-ID: SonarQube
-Secret: <SONARQUBE_TOKEN>
+GatewayClass
+     |
+     | "Use ALB controller"
+     v
+Gateway
+     |
+     | "Create/manage this ALB"
+     v
+AWS ALB
 ```
+
+The Gateway describes things such as:
+
+* which GatewayClass to use
+* listeners
+* ports
+* protocols
+* hostnames
+* TLS configuration
+* which routes may attach
+
+The controller turns this desired state into an AWS ALB.
 
 ---
 
-# 39. Configure Jenkins Tools
+# 8. HTTPRoute
 
-Go to:
+`HTTPRoute` is where your application traffic-routing rules are defined.
+
+For example:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: user-route
+  namespace: devsecops
+spec:
+  parentRefs:
+    - name: devsecops-gateway
+
+  hostnames:
+    - "api.example.com"
+
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /users
+
+      backendRefs:
+        - name: user-service-green
+          port: 8080
+```
+
+This means:
 
 ```text
-Manage Jenkins
-  -> Tools
+Request:
+
+https://api.example.com/users
+             |
+             v
+        HTTPRoute
+             |
+             v
+user-service-green:8080
 ```
 
-Configure:
-
-- Maven
-- SonarQube Scanner
-
-Default automatic installation can be used if appropriate for the environment.
+The `HTTPRoute` API defines `parentRefs`, hostnames, matches, filters and backend references.
 
 ---
 
-# 40. Configure SonarQube in Jenkins
+# 9. HTTPRoute Is the Traffic-Switching Point
 
-Go to:
+This is the most important concept for your blue-green deployment.
+
+Suppose production currently has:
 
 ```text
-Manage Jenkins
-  -> System
-  -> SonarQube servers
+HTTPRoute
+    |
+    v
+user-service-blue
 ```
 
-Add:
+and you deploy Green.
+
+The CD workflow changes the HTTPRoute:
 
 ```text
-Name: SonarQube
-Server URL: http://localhost:9000
-Authentication Token: <SONARQUBE_JENKINS_CREDENTIAL>
+BEFORE
+
+HTTPRoute
+    |
+    v
+user-service-blue
 ```
 
-Because SonarQube runs on the same Jenkins EC2 instance, `localhost:9000` is correct from Jenkins itself.
-
----
-
-# 41. Install Trivy
-
-On Jenkins server as root:
-
-```bash
-cat > /etc/yum.repos.d/trivy.repo <<'EOF'
-[trivy]
-name=Trivy repository
-baseurl=https://aquasecurity.github.io/trivy-repo/rpm/releases/$basearch/
-gpgcheck=1
-enabled=1
-gpgkey=https://aquasecurity.github.io/trivy-repo/rpm/public.key
-EOF
-```
-
-Install:
-
-```bash
-dnf clean all
-dnf install -y trivy
-
-trivy --version
-```
-
----
-
-# 42. Install Gitleaks
-
-```bash
-cd /tmp
-
-curl -LO \
-  https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-
-ls -lh /tmp/gitleaks_8.30.1_linux_x64.tar.gz
-
-tar -xzf /tmp/gitleaks_8.30.1_linux_x64.tar.gz -C /tmp
-
-sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
-
-gitleaks version
-```
-
-Test:
-
-```bash
-cd /opt/devsecops-project
-
-gitleaks detect --source . --no-banner --verbose
-```
-
-If secrets are found, fix them before continuing.
-
----
-
-# 43. Enable EKS IAM OIDC
-
-From Bastion:
-
-```bash
-cd /opt/devsecops-project
-```
-
-Run:
-
-```bash
-eksctl utils associate-iam-oidc-provider \
-  --region ap-south-1 \
-  --cluster devsecops-eks \
-  --approve
-```
-
-This is required for IAM integration with Kubernetes workloads.
-
----
-
-# 44. Install Cluster Autoscaler
-
-Create the IAM policy:
-
-```bash
-aws iam create-policy \
-  --policy-name AmazonEKSClusterAutoscalerPolicy \
-  --policy-document file://cluster-autoscaler-policy.json
-```
-
-Create the Kubernetes service account:
-
-```bash
-eksctl create iamserviceaccount \
-  --cluster devsecops-eks \
-  --region ap-south-1 \
-  --namespace kube-system \
-  --name cluster-autoscaler \
-  --attach-policy-arn arn:aws:iam::<AWS_ACCOUNT_ID>:policy/AmazonEKSClusterAutoscalerPolicy \
-  --override-existing-serviceaccounts \
-  --approve
-```
-
-Verify:
-
-```bash
-eksctl get iamserviceaccount --cluster devsecops-eks
-```
-
-Deploy Cluster Autoscaler:
-
-```bash
-kubectl apply -f \
-https://raw.githubusercontent.com/kubernetes/autoscaler/cluster-autoscaler-release-1.34/cluster-autoscaler/cloudprovider/aws/examples/cluster-autoscaler-autodiscover.yaml
-```
-
-Verify:
-
-```bash
-kubectl get deployment cluster-autoscaler -n kube-system
-```
-
-Save the original deployment:
-
-```bash
-kubectl get deployment cluster-autoscaler \
-  -n kube-system \
-  -o yaml > /tmp/cluster-autoscaler-before.yaml
-```
-
-Edit:
-
-```bash
-kubectl edit deployment cluster-autoscaler -n kube-system
-```
-
-Replace the cluster placeholder with:
+After the traffic switch:
 
 ```text
-devsecops-eks
+AFTER
+
+HTTPRoute
+    |
+    v
+user-service-green
 ```
 
-Check rollout:
+The GitHub Actions runner does not directly execute:
 
-```bash
-kubectl rollout status deployment/cluster-autoscaler -n kube-system
+```text
+Modify ALB
+Modify Target Group
+Register Pod IP
 ```
 
-Inspect the command:
+Instead, it does something conceptually like:
 
-```bash
-kubectl get deployment cluster-autoscaler \
-  -n kube-system \
-  -o jsonpath='{.spec.template.spec.containers[0].command}' | jq
-```
-
----
-
-# 45. Install Kubernetes Gateway API
-
-```bash
-kubectl apply -f \
-https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
-```
-
-Verify:
-
-```bash
-kubectl get crd | grep gateway.networking.k8s.io
-
-kubectl get gatewayclass
-```
-
----
-
-# 46. Install AWS Load Balancer Controller
-
-Download IAM policy:
-
-```bash
-curl -O \
-https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.1/docs/install/iam_policy.json
-```
-
-Verify:
-
-```bash
-ls -lh iam_policy.json
-```
-
-Create policy:
-
-```bash
-aws iam create-policy \
-  --policy-name AWSLoadBalancerControllerIAMPolicy \
-  --policy-document file://iam_policy.json
-```
-
-Verify:
-
-```bash
-aws iam get-policy \
-  --policy-arn arn:aws:iam::<AWS_ACCOUNT_ID>:policy/AWSLoadBalancerControllerIAMPolicy
+```text
+kubectl apply / kubectl patch HTTPRoute
+                  |
+                  v
+           Kubernetes API
+                  |
+                  v
+          HTTPRoute changed
+                  |
+                  v
+       AWS Load Balancer Controller
+                  |
+                  v
+           AWS API calls
+                  |
+                  v
+              ALB changed
 ```
 
 ---
 
-# 47. Create ALB Controller Service Account
+# 10. Kubernetes Service
 
-```bash
-eksctl create iamserviceaccount \
-  --cluster devsecops-eks \
-  --namespace kube-system \
-  --name aws-load-balancer-controller \
-  --attach-policy-arn arn:aws:iam::<AWS_ACCOUNT_ID>:policy/AWSLoadBalancerControllerIAMPolicy \
-  --override-existing-serviceaccounts \
-  --region ap-south-1 \
-  --approve
+The HTTPRoute normally points to a Kubernetes Service.
+
+Example:
+
+```yaml
+backendRefs:
+  - name: user-service-green
+    port: 8080
 ```
 
-Verify:
+The Service provides a stable Kubernetes abstraction over changing Pods.
 
-```bash
-kubectl get serviceaccount \
-  aws-load-balancer-controller \
-  -n kube-system
+For example:
 
-kubectl describe serviceaccount \
-  aws-load-balancer-controller \
-  -n kube-system
+```text
+user-service-green
+        |
+        +----------------+
+        |                |
+        v                v
+Pod Green #1       Pod Green #2
+10.0.3.21:8080     10.0.4.17:8080
 ```
+
+The Service itself does not become an AWS Target Group.
+
+The AWS Load Balancer Controller uses the Service/backend relationship to build the AWS target-group configuration.
 
 ---
 
-# 48. Install Helm
+# 11. EndpointSlices
 
-```bash
-curl -fsSL -o get_helm.sh \
-  https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+This is an important piece people often forget.
 
-chmod 700 get_helm.sh
-
-./get_helm.sh
-
-helm version
-```
-
-Add EKS chart repository:
-
-```bash
-helm repo add eks https://aws.github.io/eks-charts
-helm repo update
-
-helm search repo eks/aws-load-balancer-controller
-```
-
-Install ALB Controller with Gateway API support:
-
-```bash
-helm install aws-load-balancer-controller \
-  eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=devsecops-eks \
-  --set serviceAccount.create=false \
-  --set serviceAccount.name=aws-load-balancer-controller \
-  --set controllerConfig.featureGates.ALBGatewayAPI=true \
-  --version 1.14.0
-```
-
-### Why `ALBGatewayAPI=true` matters
-
-The project uses Kubernetes Gateway API.
-
-Without enabling the Gateway API feature gate, the controller is not configured to use the Gateway API functionality required by this design.
-
-Verify:
-
-```bash
-kubectl get pods -n kube-system | grep aws-load-balancer
-
-kubectl get deployment \
-  aws-load-balancer-controller \
-  -n kube-system
-```
-
-Check logs:
-
-```bash
-kubectl logs \
-  -n kube-system \
-  deployment/aws-load-balancer-controller \
-  --tail=50
-```
-
----
-
-# 49. Configure Route 53 and ACM
-
-Create a Route 53 hosted zone for your domain.
+Kubernetes maintains EndpointSlices containing the current endpoints behind a Service.
 
 Example:
 
 ```text
-<YOUR_DOMAIN>
+Service:
+user-service-green
+
+EndpointSlice:
+
+10.0.3.21:8080
+10.0.4.17:8080
+10.0.5.32:8080
 ```
 
-Update the domain registrar's nameservers with the nameservers provided by Route 53.
-
-Then create an ACM certificate covering:
+If a Pod is deleted:
 
 ```text
-*.<YOUR_DOMAIN>
+10.0.3.21
 ```
 
-Also include the root domain if required by the application.
+the EndpointSlice changes.
 
-Complete DNS validation.
-
-Copy the ACM certificate ARN:
+If a new Pod appears:
 
 ```text
-<ACM_CERTIFICATE_ARN>
+10.0.8.44
 ```
 
----
+the EndpointSlice changes.
 
-# 50. Configure Application Load Balancer Manifest
+The controller watches these changes and reconciles AWS target registration.
 
-Edit:
-
-```bash
-vi /opt/devsecops-project/k8s/loadbalancer-config.yaml
-```
-
-Update the ACM certificate ARN.
-
-**Do not manually apply this manifest if Argo CD is managing the `k8s` directory.**
-
-Argo CD should deploy it from Git.
-
----
-
-# 51. Install Argo CD
-
-Create namespace:
-
-```bash
-kubectl create namespace argocd
-```
-
-Install:
-
-```bash
-kubectl apply -n argocd \
-  --server-side \
-  --force-conflicts \
-  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
-```
-
-Verify:
-
-```bash
-kubectl get pods -n argocd
-kubectl get svc -n argocd
-```
-
-Retrieve initial admin password:
-
-```bash
-kubectl -n argocd get secret argocd-initial-admin-secret \
-  -o jsonpath='{.data.password}' | base64 -d
-
-echo
-```
-
----
-
-# 52. Access Argo CD from Bastion
-
-On Bastion:
-
-```bash
-kubectl port-forward svc/argocd-server \
-  -n argocd \
-  8080:443 \
-  --address=0.0.0.0
-```
-
-Keep this terminal open.
-
-Install Argo CD CLI:
-
-```bash
-curl -sSL -o /usr/local/bin/argocd \
-  https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-
-chmod +x /usr/local/bin/argocd
-
-argocd version --client
-```
-
-Login:
-
-```bash
-argocd login localhost:8080 \
-  --username admin \
-  --password '<ARGOCD_PASSWORD>' \
-  --insecure
-```
-
-Verify:
-
-```bash
-argocd account get-user-info
-```
-
-`argocd cluster add` is only required if Argo CD needs to manage another Kubernetes cluster. It is not necessary for the standard in-cluster deployment described here.
-
----
-
-# 53. Add GitHub Repository to Argo CD
-
-Create an SSH key on Bastion:
-
-```bash
-ssh-keygen -t ed25519 -C "argocd-devsecops"
-```
-
-Show public key:
-
-```bash
-cat ~/.ssh/id_ed25519.pub
-```
-
-Add the public key to GitHub:
+So the chain is:
 
 ```text
-Repository
-  -> Settings
-  -> Deploy keys
-```
-
-Use the private key when configuring the repository in Argo CD.
-
-In Argo CD UI:
-
-```text
-Settings
-  -> Repositories
-  -> Connect Repository
-```
-
-Configure the SSH Git repository:
-
-```text
-Repository URL: <GITHUB_SSH_REPOSITORY_URL>
-Private Key: <ARG0CD_PRIVATE_KEY>
+Deployment
+    |
+    v
+Pods
+    |
+    v
+EndpointSlice
+    |
+    v
+AWS Load Balancer Controller
+    |
+    v
+AWS Target Group
 ```
 
 ---
 
-# 54. Create the Argo CD Application
+# 12. Target Group
 
-Create:
+An AWS Target Group is the collection of backend targets that receive traffic from the ALB.
 
-```text
-Application name: devsecops-app
-Repository: <GITHUB_REPOSITORY>
-Path: k8s
-Destination namespace: devsecops
-```
-
-The `k8s` directory becomes the GitOps source of truth.
-
-Argo CD continuously compares Git with the cluster and synchronizes the desired state.
-
----
-
-# 55. Create Application Namespace
-
-Before Jenkins/Argo CD deploys application resources:
-
-```bash
-kubectl create namespace devsecops
-```
-
-Verify:
-
-```bash
-kubectl get namespace devsecops
-```
-
----
-
-# 56. Configure RDS Kubernetes Secret
-
-Create the application secret:
-
-```bash
-kubectl create secret generic devsecops-secrets \
-  -n devsecops \
-  --from-literal=DB_HOST='<RDS_ENDPOINT>' \
-  --from-literal=DB_PORT='3306' \
-  --from-literal=DB_USERNAME='admin' \
-  --from-literal=DB_PASSWORD='<RDS_PASSWORD>' \
-  --from-literal=JWT_SECRET='<JWT_SECRET>' \
-  --from-literal=JWT_EXPIRATION='3600000'
-```
-
-Verify:
-
-```bash
-kubectl get secret devsecops-secrets -n devsecops
-```
-
-**Important:** Kubernetes Secrets are not a substitute for proper secret management in production. For a production implementation, consider AWS Secrets Manager + External Secrets.
-
----
-
-# 57. Configure RDS Access from EKS
-
-Get the EKS cluster security group:
-
-```bash
-aws eks describe-cluster \
-  --name devsecops-eks \
-  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' \
-  --output text
-```
-
-Allow that security group in:
+For IP mode:
 
 ```text
-devsecops-rds-sg
+Target Group Green
+
+Targets:
+
+10.0.3.21:8080
+10.0.4.17:8080
+10.0.5.32:8080
 ```
 
-Port:
+These are Pod IPs.
+
+The ALB sends traffic directly to those Pod IPs.
+
+AWS documents that IP mode registers Pods directly as ALB targets, while instance mode registers Kubernetes nodes and forwards through NodePort.
+
+For your architecture, the important model is:
 
 ```text
-3306
-```
-
-Find the security groups attached to a node if required:
-
-```bash
-aws ec2 describe-instances \
-  --filters "Name=private-dns-name,Values=<PRIVATE_NODE_DNS>" \
-  --query 'Reservations[].Instances[].SecurityGroups[*].[GroupId,GroupName]' \
-  --output table
-```
-
-Also inspect RDS security groups:
-
-```bash
-aws rds describe-db-instances \
-  --db-instance-identifier devsecops-mysql \
-  --query 'DBInstances[0].VpcSecurityGroups[*].VpcSecurityGroupId' \
-  --output text
-```
-
-The important requirement is:
-
-```text
-EKS workload/node security group
-          |
-          | TCP 3306
-          v
-devsecops-rds-sg
-          |
-          v
-RDS MySQL
+ALB
+ |
+ v
+Target Group
+ |
+ +---- Pod IP 10.0.3.21
+ |
+ +---- Pod IP 10.0.4.17
+ |
+ +---- Pod IP 10.0.5.32
 ```
 
 ---
 
-# 58. Verify Application Pods
+# 13. Why IP Target Type Matters
 
-```bash
-kubectl get pods -n devsecops
-```
-
-At this stage the services may be deployed by Argo CD.
-
----
-
-# 59. First-Time GitHub Host Verification from Jenkins
-
-Connect to Jenkins as the Jenkins user:
-
-```bash
-sudo -iu jenkins
-```
-
-Clone once:
-
-```bash
-git clone git@github.com:<GITHUB_OWNER>/<GITHUB_REPOSITORY>.git
-```
-
-The purpose of this step is to establish GitHub's SSH host key in the Jenkins user's SSH configuration.
-
----
-
-# 60. Install Argo Rollouts
-
-Run from Bastion.
-
-Create namespace:
-
-```bash
-kubectl create namespace argo-rollouts
-```
-
-Install:
-
-```bash
-kubectl apply -n argo-rollouts \
-  -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
-```
-
-Verify:
-
-```bash
-kubectl get pods -n argo-rollouts
-kubectl get deployment -n argo-rollouts
-
-kubectl logs \
-  -n argo-rollouts \
-  deploy/argo-rollouts \
-  --tail=30
-```
-
----
-
-# 61. Install Argo Rollouts kubectl Plugin
-
-```bash
-curl -LO \
-  https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
-
-chmod +x kubectl-argo-rollouts-linux-amd64
-
-mv kubectl-argo-rollouts-linux-amd64 \
-  /usr/local/bin/kubectl-argo-rollouts
-```
-
-Verify:
-
-```bash
-kubectl argo rollouts version
-```
-
----
-
-# 62. Verify Argo CD and Rollouts
-
-```bash
-kubectl get applications -A
-
-kubectl get application <APP_NAME> -n argocd
-```
-
-Check a rollout:
-
-```bash
-kubectl get rollout user-service -n devsecops
-
-kubectl argo rollouts get rollout \
-  user-service \
-  -n devsecops
-```
-
-Check ReplicaSets:
-
-```bash
-kubectl get rs -n devsecops
-```
-
-Check services:
-
-```bash
-kubectl get svc \
-  user-service \
-  user-service-preview \
-  -n devsecops
-```
-
-Check endpoints:
-
-```bash
-kubectl get endpoints \
-  user-service \
-  user-service-preview \
-  -n devsecops
-```
-
-Check rollout status:
-
-```bash
-kubectl argo rollouts status \
-  user-service \
-  -n devsecops
-```
-
-Watch:
-
-```bash
-kubectl argo rollouts get rollout \
-  user-service \
-  -n devsecops \
-  --watch
-```
-
----
-
-# 63. Create Jenkins Pipeline
-
-In Jenkins:
+With:
 
 ```text
-New Item
-  -> Pipeline
+targetType = ip
 ```
 
-Use:
+the ALB directly targets Pods.
+
+Traffic:
 
 ```text
-Name: devsecops-app
+ALB
+ |
+ v
+Pod IP
 ```
 
-Select:
+Instead of:
 
 ```text
-Pipeline script from SCM
+ALB
+ |
+ v
+Node
+ |
+ v
+NodePort
+ |
+ v
+Pod
 ```
 
-SCM:
-
-```text
-Git
-```
-
-Repository:
-
-```text
-<GITHUB_SSH_REPOSITORY_URL>
-```
-
-Credentials:
-
-```text
-github-ssh
-```
-
-Jenkinsfile:
-
-```text
-jenkins-arcgocd-kustomization
-```
-
-Save and trigger a build.
-
-The Jenkinsfile should perform the CI stages defined by the project, such as:
-
-```text
-Checkout
-   |
-Build/Test
-   |
-Gitleaks
-   |
-SonarQube
-   |
-Trivy
-   |
-Docker Build
-   |
-ECR Push
-   |
-Update deployment image
-   |
-Git commit/push
-   |
-Argo CD detects Git change
-   |
-Argo Rollouts performs deployment
-```
+For EKS VPC networking, Pod IPs are directly reachable by the ALB when the networking prerequisites are satisfied.
 
 ---
 
-# 64. Check Rollout Revisions
+# 14. TargetGroupConfiguration — TGC
 
-When required:
+`TargetGroupConfiguration` is an AWS Load Balancer Controller CRD used to customize Target Group behavior.
 
-```bash
-kubectl argo rollouts get rollout user-service -n devsecops
+It does **not mean "create the target group manually."**
 
-kubectl argo rollouts get rollout product-service -n devsecops
+Instead, it tells the controller:
 
-kubectl argo rollouts get rollout order-service -n devsecops
-```
+> "When you create/manage the Target Group for this backend, use these properties."
 
----
-
-# 65. Prometheus and Alertmanager Setup
-
-Create monitoring namespace:
-
-```bash
-kubectl create namespace monitoring
-
-kubectl get namespace monitoring
-```
-
-Add repository:
-
-```bash
-helm repo add prometheus-community \
-  https://prometheus-community.github.io/helm-charts
-
-helm repo update
-
-helm search repo prometheus-community/kube-prometheus-stack
-```
-
----
-
-# 66. Gmail App Password for Alertmanager
-
-Create a Gmail App Password from the Google account used for alert notifications.
-
-Do not store the App Password in Git.
-
-Create the Kubernetes secret:
-
-```bash
-kubectl create secret generic alertmanager-gmail \
-  -n monitoring \
-  --from-literal=smtp-auth-password='<GMAIL_APP_PASSWORD>'
-```
-
-Verify the key exists:
-
-```bash
-kubectl get secret alertmanager-gmail \
-  -n monitoring \
-  -o jsonpath='{.data}' | jq 'keys'
-```
-
-Check the decoded secret length without displaying the password:
-
-```bash
-kubectl get secret alertmanager-gmail \
-  -n monitoring \
-  -o jsonpath='{.data.smtp-auth-password}' \
-  | base64 -d | wc -c
-```
-
----
-
-# 67. Prometheus Helm Values
-
-Create:
-
-```bash
-vi k8s/monitoring/values.yaml
-```
-
-Use:
+For example:
 
 ```yaml
-alertmanager:
-  enabled: true
-
-  config:
-    global:
-      resolve_timeout: 5m
-      smtp_smarthost: 'smtp.gmail.com:587'
-      smtp_from: '<YOUR_GMAIL>@gmail.com'
-      smtp_auth_username: '<YOUR_GMAIL>@gmail.com'
-      smtp_auth_password_file: '/etc/alertmanager/secrets/alertmanager-gmail/smtp-auth-password'
-      smtp_require_tls: true
-
-    route:
-      group_by:
-        - alertname
-        - namespace
-        - severity
-      group_wait: 30s
-      group_interval: 5m
-      repeat_interval: 12h
-      receiver: 'devsecops-gmail'
-
-      routes:
-        - receiver: 'null'
-          matchers:
-            - 'alertname = "Watchdog"'
-
-    receivers:
-      - name: 'devsecops-gmail'
-        email_configs:
-          - to: '<YOUR_GMAIL>@gmail.com'
-            send_resolved: true
-
-      - name: 'null'
-
-  alertmanagerSpec:
-    replicas: 1
-    secrets:
-      - alertmanager-gmail
-
-grafana:
-  enabled: true
-
-  additionalDataSources:
-    - name: Loki
-      type: loki
-      uid: loki
-      url: http://loki-gateway.loki.svc.cluster.local
-      access: proxy
-      isDefault: false
-
-    - name: Tempo
-      type: tempo
-      uid: tempo
-      url: http://tempo.tempo.svc.cluster.local:3200
-      access: proxy
-      isDefault: false
-
-prometheus:
-  enabled: true
-```
-
-**Note:** Loki and Tempo must eventually exist at the service addresses configured above. If monitoring is installed before Loki/Tempo, Grafana may initially show datasource connection failures until those services are available.
-
----
-
-# 68. Validate Prometheus Helm Template
-
-Before installation:
-
-```bash
-helm template monitoring \
-  prometheus-community/kube-prometheus-stack \
-  -n monitoring \
-  -f k8s/monitoring/values.yaml \
-  > /tmp/monitoring-rendered.yaml
-```
-
-Inspect Alertmanager secret configuration:
-
-```bash
-grep -n -A20 -B5 \
-  'alertmanager-monitoring-kube-prometheus-alertmanager' \
-  /tmp/monitoring-rendered.yaml
-```
-
-Inspect SMTP configuration:
-
-```bash
-grep -n \
-  'smtp_auth_password_file\|smtp_smarthost\|smtp_auth_username' \
-  /tmp/monitoring-rendered.yaml
-```
-
-Install:
-
-```bash
-helm install monitoring \
-  prometheus-community/kube-prometheus-stack \
-  -n monitoring \
-  -f k8s/monitoring/values.yaml
-```
-
-Verify:
-
-```bash
-kubectl get pods -n monitoring
-kubectl get prometheus -n monitoring
-kubectl get alertmanager -n monitoring
-```
-
----
-
-# 69. Verify Alertmanager Gmail Secret
-
-```bash
-kubectl exec -n monitoring \
-  alertmanager-monitoring-kube-prometheus-alertmanager-0 \
-  -- ls -l /etc/alertmanager/secrets/alertmanager-gmail/
-```
-
-Check the file without printing its contents:
-
-```bash
-kubectl exec -n monitoring \
-  alertmanager-monitoring-kube-prometheus-alertmanager-0 \
-  -- sh -c \
-  'test -s /etc/alertmanager/secrets/alertmanager-gmail/smtp-auth-password && echo "GMAIL SECRET OK" || echo "GMAIL SECRET MISSING"'
-```
-
-Inspect Alertmanager configuration:
-
-```bash
-kubectl exec -n monitoring \
-  alertmanager-monitoring-kube-prometheus-alertmanager-0 \
-  -- cat /etc/alertmanager/config_out/alertmanager.env.yaml
-```
-
-Check logs:
-
-```bash
-kubectl logs -n monitoring \
-  alertmanager-monitoring-kube-prometheus-alertmanager-0 \
-  -c alertmanager \
-  --tail=100
-```
-
----
-
-# 70. Test Gmail Alerting
-
-Create a temporary Prometheus alert:
-
-```bash
-kubectl apply -n monitoring -f - <<'EOF'
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
+apiVersion: gateway.k8s.aws/v1
+kind: TargetGroupConfiguration
 metadata:
-  name: gmail-test-alert
-  labels:
-    release: monitoring
+  name: user-service-tgc
+  namespace: devsecops-green
+
 spec:
-  groups:
-  - name: gmail-test
-    rules:
-    - alert: GmailTestAlert
-      expr: vector(1)
-      for: 30s
-      labels:
-        severity: critical
-      annotations:
-        summary: "DevSecOps Gmail Alert Test"
-        description: "This is a temporary test alert for Alertmanager Gmail notification."
-EOF
+  targetReference:
+    name: user-service-green
+
+  defaultConfiguration:
+    targetType: ip
+
+    healthCheckConfig:
+      healthCheckPath: /health
+
+    targetGroupAttributes:
+      - key: deregistration_delay.timeout_seconds
+        value: "30"
 ```
 
-Verify:
-
-```bash
-kubectl get prometheusrule -n monitoring
-```
-
-After testing:
-
-```bash
-kubectl delete prometheusrule gmail-test-alert -n monitoring
-```
-
-Verify cleanup:
-
-```bash
-kubectl get prometheusrule -n monitoring
-```
-
-General monitoring verification:
-
-```bash
-helm list -n monitoring
-kubectl get pods -n monitoring
-kubectl get prometheus -n monitoring
-kubectl get alertmanager -n monitoring
-kubectl get servicemonitor -n monitoring
-kubectl get prometheusrule -n monitoring
-```
-
----
-
-# 71. Add Grafana and Loki Helm Repositories
-
-```bash
-helm repo add grafana-community \
-  https://grafana-community.github.io/helm-charts
-
-helm repo add grafana \
-  https://grafana.github.io/helm-charts
-
-helm repo update
-
-helm repo list
-```
-
----
-
-# 72. Create S3 Bucket for Loki
-
-Create:
-
-```bash
-aws s3api create-bucket \
-  --bucket devsecops-loki-ap-south-1-<AWS_ACCOUNT_ID> \
-  --region ap-south-1 \
-  --create-bucket-configuration LocationConstraint=ap-south-1
-```
-
-Enable versioning:
-
-```bash
-aws s3api put-bucket-versioning \
-  --bucket devsecops-loki-ap-south-1-<AWS_ACCOUNT_ID> \
-  --versioning-configuration Status=Enabled
-```
-
-Block public access:
-
-```bash
-aws s3api put-public-access-block \
-  --bucket devsecops-loki-ap-south-1-<AWS_ACCOUNT_ID> \
-  --public-access-block-configuration \
-  BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-```
-
-Verify:
-
-```bash
-aws s3api get-bucket-location \
-  --bucket devsecops-loki-ap-south-1-<AWS_ACCOUNT_ID>
-
-aws s3api get-public-access-block \
-  --bucket devsecops-loki-ap-south-1-<AWS_ACCOUNT_ID>
-```
-
----
-
-# 73. Create Loki IAM Policy and Role
-
-Edit:
-
-```bash
-vi /opt/devsecops-project/loki-s3-policy.json
-```
-
-Replace the account/bucket-specific values.
-
-Create policy:
-
-```bash
-aws iam create-policy \
-  --policy-name DevSecOpsLokiS3Policy \
-  --policy-document file:///opt/devsecops-project/loki-s3-policy.json
-```
-
-Verify:
-
-```bash
-aws iam get-policy \
-  --policy-arn arn:aws:iam::<AWS_ACCOUNT_ID>:policy/DevSecOpsLokiS3Policy
-```
-
-Create role:
-
-```bash
-aws iam create-role \
-  --role-name DevSecOpsLokiRole \
-  --assume-role-policy-document file:///opt/devsecops-project/loki-pod-identity-trust.json
-```
-
-Attach policy:
-
-```bash
-aws iam attach-role-policy \
-  --role-name DevSecOpsLokiRole \
-  --policy-arn arn:aws:iam::<AWS_ACCOUNT_ID>:policy/DevSecOpsLokiS3Policy
-```
-
-Verify:
-
-```bash
-aws iam list-attached-role-policies \
-  --role-name DevSecOpsLokiRole
-
-aws iam get-role \
-  --role-name DevSecOpsLokiRole \
-  --query 'Role.Arn' \
-  --output text
-```
-
----
-
-# 74. Configure EKS Pod Identity for Loki
-
-Create namespace:
-
-```bash
-kubectl create namespace loki
-```
-
-Create Pod Identity association:
-
-```bash
-aws eks create-pod-identity-association \
-  --cluster-name devsecops-eks \
-  --namespace loki \
-  --service-account loki \
-  --role-arn arn:aws:iam::<AWS_ACCOUNT_ID>:role/DevSecOpsLokiRole \
-  --region ap-south-1
-```
-
-List associations:
-
-```bash
-aws eks list-pod-identity-associations \
-  --cluster-name devsecops-eks \
-  --region ap-south-1
-```
-
-Describe an association:
-
-```bash
-aws eks describe-pod-identity-association \
-  --cluster-name devsecops-eks \
-  --association-id <ASSOCIATION_ID> \
-  --region ap-south-1
-```
-
-Readable output:
-
-```bash
-aws eks describe-pod-identity-association \
-  --cluster-name devsecops-eks \
-  --association-id <ASSOCIATION_ID> \
-  --region ap-south-1 \
-  --query 'association.{Namespace:namespace,ServiceAccount:serviceAccount,Role:roleArn}' \
-  --output table
-```
-
-Check the EKS Pod Identity Agent:
-
-```bash
-aws eks describe-addon \
-  --cluster-name devsecops-eks \
-  --addon-name eks-pod-identity-agent \
-  --region ap-south-1
-```
-
-If it is not installed:
-
-```bash
-aws eks create-addon \
-  --cluster-name devsecops-eks \
-  --addon-name eks-pod-identity-agent \
-  --region ap-south-1
-```
-
-Verify:
-
-```bash
-kubectl get pods -n kube-system
-```
-
----
-
-# 75. Install Loki
-
-Edit:
-
-```bash
-vi /opt/devsecops-project/k8s/monitoring/loki/values.yaml
-```
-
-Update:
+This can control things such as:
 
 ```text
-<AWS_ACCOUNT_ID>
+Target type
+Health checks
+Target Group attributes
+Tags
+Other target-group properties
 ```
 
-Install:
-
-```bash
-helm install loki \
-  grafana-community/loki \
-  --version 18.11.0 \
-  --namespace loki \
-  -f k8s/monitoring/loki/values.yaml
-```
-
-Verify:
-
-```bash
-kubectl get pods -n loki
-kubectl get svc -n loki
-```
-
-The expected Loki gateway address used by Grafana is:
+AWS documents three levels of TGC customization:
 
 ```text
-http://loki-gateway.loki.svc.cluster.local
+GatewayClass defaults
+        |
+        v
+Gateway defaults
+        |
+        v
+Service-specific configuration
+```
+
+and route-specific overrides can also be defined.
+
+---
+
+# 15. TargetGroupBinding — TGB
+
+This is another important concept.
+
+`TargetGroupBinding` represents the relationship between:
+
+```text
+Kubernetes Service
+        +
+AWS Target Group
+```
+
+Example:
+
+```yaml
+apiVersion: elbv2.k8s.aws/v1beta1
+kind: TargetGroupBinding
+metadata:
+  name: user-service-green
+spec:
+  serviceRef:
+    name: user-service-green
+    port: 8080
+
+  targetGroupARN:
+    arn:aws:elasticloadbalancing:...
+```
+
+Conceptually:
+
+```text
+AWS Target Group
+       |
+       | TargetGroupBinding
+       |
+       v
+Kubernetes Service
+       |
+       v
+EndpointSlices
+       |
+       v
+Pod IPs
+```
+
+But here is the important detail:
+
+> **You normally do NOT create TGB manually for ordinary Gateway API traffic.**
+
+The AWS Load Balancer Controller internally uses `TargetGroupBinding` for Ingress, Service, and Gateway resources and automatically creates the relevant TGB in the Service namespace.
+
+Therefore your architecture may contain TGB objects even though your CD workflow never creates them.
+
+---
+
+# 16. TGC vs TGB
+
+These two are easy to confuse.
+
+| Resource                   | Main purpose                                     |
+| -------------------------- | ------------------------------------------------ |
+| `TargetGroupConfiguration` | Configure how the AWS Target Group should behave |
+| `TargetGroupBinding`       | Bind an AWS Target Group to a Kubernetes Service |
+| `Service`                  | Stable Kubernetes backend abstraction            |
+| `EndpointSlice`            | Current Pod endpoints                            |
+| `HTTPRoute`                | HTTP traffic routing decision                    |
+| `Gateway`                  | Traffic entry point / ALB                        |
+| `GatewayClass`             | Selects the controller                           |
+
+Think of it this way:
+
+```text
+HTTPRoute
+    |
+    | "Send traffic to"
+    v
+Service
+    |
+    | "These are the current Pods"
+    v
+EndpointSlice
+    |
+    v
+TGB
+    |
+    | "This AWS TG represents this backend"
+    v
+AWS Target Group
+    |
+    v
+Pod IPs
+```
+
+While TGC is configuration applied to the Target Group:
+
+```text
+TGC
+ |
+ +---- targetType = ip
+ |
+ +---- health check = /health
+ |
+ +---- deregistration delay
+ |
+ +---- target group attributes
 ```
 
 ---
 
-# 76. Configure EBS CSI Driver
+# 17. How Pod IPs Enter the AWS Target Group
 
-Edit:
+This is the part you were specifically asking about.
 
-```bash
-vi /opt/devsecops-project/ebs-csi-trust.json
+Suppose Green has:
+
+```text
+Deployment:
+
+user-service-green
+
+Pods:
+
+Pod 1 → 10.0.3.21
+Pod 2 → 10.0.4.17
+Pod 3 → 10.0.5.32
 ```
 
-Update the AWS OIDC-related values for this cluster.
+Kubernetes creates/updates EndpointSlices:
 
-Create IAM role:
-
-```bash
-aws iam create-role \
-  --role-name DevSecOpsEBSCSIRole \
-  --assume-role-policy-document file:///opt/devsecops-project/ebs-csi-trust.json
+```text
+user-service-green
+        |
+        v
+EndpointSlice
+        |
+        +---- 10.0.3.21:8080
+        +---- 10.0.4.17:8080
+        +---- 10.0.5.32:8080
 ```
 
-Attach policy:
+The AWS Load Balancer Controller reconciles the target group:
 
-```bash
-aws iam attach-role-policy \
-  --role-name DevSecOpsEBSCSIRole \
-  --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+```text
+Target Group Green
+
+Registered Targets:
+
+10.0.3.21:8080
+10.0.4.17:8080
+10.0.5.32:8080
 ```
 
-Create EKS addon:
+If Pod 2 disappears:
 
-```bash
-aws eks create-addon \
-  --cluster-name devsecops-eks \
-  --addon-name aws-ebs-csi-driver \
-  --addon-version v1.64.0-eksbuild.1 \
-  --service-account-role-arn arn:aws:iam::<AWS_ACCOUNT_ID>:role/DevSecOpsEBSCSIRole \
-  --region ap-south-1
+```text
+Pod 2
+10.0.4.17
+     X
 ```
 
-Check status:
+EndpointSlice changes:
 
-```bash
-aws eks describe-addon \
-  --cluster-name devsecops-eks \
-  --addon-name aws-ebs-csi-driver \
-  --region ap-south-1 \
-  --query 'addon.{Status:status,Version:addonVersion,Health:health}'
+```text
+10.0.3.21
+10.0.5.32
 ```
 
-Create GP3 StorageClass:
+Controller reconciles:
 
-```bash
-kubectl apply -f k8s/storage/gp3-storageclass.yaml
+```text
+Target Group
+
+REMOVE:
+10.0.4.17
+
+KEEP:
+10.0.3.21
+10.0.5.32
 ```
 
-Verify:
+If Kubernetes creates a new Pod:
 
-```bash
-kubectl get storageclass
+```text
+10.0.8.44
 ```
+
+the controller eventually registers:
+
+```text
+10.0.8.44
+```
+
+Therefore:
+
+> **Pod IP registration is continuously reconciled. It is not a one-time operation performed during deployment.**
 
 ---
 
-# 77. Grafana Alloy
+# 18. Blue-Green Architecture
 
-Add Grafana repository if not already present:
-
-```bash
-helm repo add grafana \
-  https://grafana.github.io/helm-charts
-
-helm repo update
-
-helm search repo grafana/alloy --versions | head -20
-```
-
-The project deploys Alloy through Argo CD.
-
-Apply the Alloy Argo CD application:
-
-```bash
-kubectl apply -f k8s/monitoring/alloy/application.yaml
-```
-
-Verify:
-
-```bash
-kubectl get application alloy -n argocd
-
-kubectl get pods -n alloy
-
-kubectl get pods -n alloy -o wide
-
-kubectl get daemonset -n alloy
-```
-
-Check logs:
-
-```bash
-kubectl logs \
-  -n alloy \
-  -l app.kubernetes.io/name=alloy \
-  --tail=50
-```
-
-Inspect labels:
-
-```bash
-kubectl get pods -n alloy --show-labels
-```
-
-Alloy's responsibility in this architecture is to collect Kubernetes/application logs and forward them to Loki.
-
----
-
-# 78. Tempo Object Storage
-
-Create S3 bucket:
-
-```bash
-aws s3api create-bucket \
-  --bucket devsecops-tempo-ap-south-1-<AWS_ACCOUNT_ID> \
-  --region ap-south-1 \
-  --create-bucket-configuration LocationConstraint=ap-south-1
-```
-
-Enable server-side encryption:
-
-```bash
-aws s3api put-bucket-encryption \
-  --bucket devsecops-tempo-ap-south-1-<AWS_ACCOUNT_ID> \
-  --server-side-encryption-configuration \
-  '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
-```
-
-Verify:
-
-```bash
-aws s3api head-bucket \
-  --bucket devsecops-tempo-ap-south-1-<AWS_ACCOUNT_ID>
-```
-
----
-
-# 79. Tempo IAM Policy
-
-Create policy:
-
-```bash
-aws iam create-policy \
-  --policy-name devsecops-tempo-s3-policy \
-  --policy-document file://tempo-s3-policy.json
-```
-
-Verify:
-
-```bash
-aws iam get-policy \
-  --policy-arn arn:aws:iam::<AWS_ACCOUNT_ID>:policy/devsecops-tempo-s3-policy
-```
-
----
-
-# 80. Tempo IAM Role
-
-Edit:
-
-```bash
-vi /opt/devsecops/tempo-pod-identity-trust.json
-```
-
-Update account-specific values.
-
-Create role:
-
-```bash
-aws iam create-role \
-  --role-name devsecops-tempo-s3-role \
-  --assume-role-policy-document file://tempo-pod-identity-trust.json
-```
-
-Attach policy:
-
-```bash
-aws iam attach-role-policy \
-  --role-name devsecops-tempo-s3-role \
-  --policy-arn arn:aws:iam::<AWS_ACCOUNT_ID>:policy/devsecops-tempo-s3-policy
-```
-
-Verify:
-
-```bash
-aws iam list-attached-role-policies \
-  --role-name devsecops-tempo-s3-role
-```
-
----
-
-# 81. Tempo EKS Pod Identity
-
-Create association:
-
-```bash
-aws eks create-pod-identity-association \
-  --cluster-name devsecops-eks \
-  --namespace tempo \
-  --service-account tempo \
-  --role-arn arn:aws:iam::<AWS_ACCOUNT_ID>:role/devsecops-tempo-s3-role \
-  --region ap-south-1
-```
-
-Verify:
-
-```bash
-aws eks list-pod-identity-associations \
-  --cluster-name devsecops-eks \
-  --output table
-```
-
----
-
-# 82. Configure Tempo
-
-Edit:
-
-```bash
-vi /opt/devsecops-project/k8s/monitoring/tempo/values.yaml
-```
-
-Update:
+Assume:
 
 ```text
-<AWS_ACCOUNT_ID>
-```
-
-Deploy through Argo CD:
-
-```bash
-kubectl apply -f k8s/monitoring/tempo/application.yaml
-```
-
-Verify Argo application:
-
-```bash
-kubectl get application tempo -n argocd
-```
-
-Verify Tempo:
-
-```bash
-kubectl get pods -n tempo
-kubectl get pvc -n tempo
-```
-
-Check logs:
-
-```bash
-kubectl logs -n tempo tempo-0 --tail=100
-```
-
-Confirm S3 backend:
-
-```bash
-kubectl exec -n tempo tempo-0 -- \
-  sh -c 'grep -n -A15 -B5 "backend: s3" /conf/tempo.yaml'
-```
-
----
-
-# 83. Verify OpenTelemetry Configuration
-
-Check application pods:
-
-```bash
-kubectl get pods -n devsecops
-```
-
-Inspect running processes:
-
-```bash
-kubectl exec -n devsecops deploy/user-service -- ps aux
-
-kubectl exec -n devsecops deploy/product-service -- ps aux
-
-kubectl exec -n devsecops deploy/order-service -- ps aux
-```
-
-Check OTEL environment variables:
-
-```bash
-kubectl exec -n devsecops deploy/user-service -- env | grep OTEL
-
-kubectl exec -n devsecops deploy/product-service -- env | grep OTEL
-
-kubectl exec -n devsecops deploy/order-service -- env | grep OTEL
-```
-
-Expected architecture:
-
-```text
-Java Microservice
-      |
-      | OpenTelemetry
-      v
-OTEL Collector / Alloy
-      |
-      v
-Tempo
-      |
-      v
-S3
-```
-
----
-
-# 84. UI Port Forwarding from Bastion
-
-Run each command in a separate Bastion terminal and keep the processes running.
-
-## Prometheus
-
-```bash
-kubectl port-forward \
-  -n monitoring \
-  svc/monitoring-kube-prometheus-prometheus \
-  9090:9090 \
-  --address=0.0.0.0
-```
-
-## Argo CD
-
-```bash
-kubectl port-forward \
-  svc/argocd-server \
-  -n argocd \
-  8080:443 \
-  --address=0.0.0.0
-```
-
-## Grafana
-
-```bash
-kubectl port-forward \
-  -n monitoring \
-  svc/monitoring-grafana \
-  3000:80 \
-  --address=0.0.0.0
-```
-
----
-
-# 85. Access the UI Through Bastion
-
-If the Bastion security group permits these ports from your IP:
-
-```text
-https://<BASTION_PUBLIC_IP>:8080     Argo CD
-http://<BASTION_PUBLIC_IP>:3000      Grafana
-http://<BASTION_PUBLIC_IP>:9090      Prometheus
-```
-
-For stronger security, prefer SSH tunnels rather than exposing port-forward ports publicly.
-
----
-
-# 86. Grafana Credentials
-
-Get username:
-
-```bash
-kubectl -n monitoring get secret monitoring-grafana \
-  -o jsonpath='{.data.admin-user}' | base64 -d
-
-echo
-```
-
-Get password:
-
-```bash
-kubectl -n monitoring get secret monitoring-grafana \
-  -o jsonpath='{.data.admin-password}' | base64 -d
-
-echo
-```
-
----
-
-# 87. Grafana Dashboards
-
-The repository contains dashboards that can be imported into Grafana.
-
-After logging into Grafana:
-
-1. Open **Dashboards**.
-2. Choose **Import**.
-3. Upload the dashboard JSON.
-4. Select the correct datasource.
-
-Use:
-
-```text
-Prometheus -> Metrics
-Loki       -> Logs
-Tempo      -> Traces
-```
-
-Do not create dozens of unnecessary panels.
-
-The objective is a small set of useful dashboards.
-
----
-
-# 88. Recommended DevSecOps Logs Dashboard
-
-Dashboard name:
-
-```text
-DevSecOps — Logs
-```
-
-Required panels:
-
-### 1. Log Volume
-
-Type:
-
-```text
-Time series
-```
-
-Purpose:
-
-```text
-Show the number of logs over time.
-```
-
-### 2. Application Logs
-
-Type:
-
-```text
-Logs
-```
-
-Filter:
-
-```text
-namespace="devsecops"
-```
-
-### 3. Error Logs
-
-Type:
-
-```text
-Logs
-```
-
-Use:
-
-```text
-detected_level="error"
-```
-
-where the log pipeline provides that field.
-
-### 4. Logs by Application
-
-Type:
-
-```text
-Bar chart / Time series
-```
-
-Group by application label.
-
-### 5. Logs by Namespace
-
-Type:
-
-```text
-Bar chart
-```
-
-Group by namespace.
-
-This is intentionally small. More panels are not automatically better.
-
----
-
-# 89. Recommended DevSecOps Tracing Dashboard
-
-Dashboard name:
-
-```text
-DevSecOps — Tracing
-```
-
-Required panels:
-
-### 1. Request Rate
-
-Shows the number of requests/traces over time.
-
-### 2. Error Rate
-
-Shows failed requests/traces.
-
-### 3. Request Duration / Latency
-
-Shows request performance.
-
-### 4. Trace Search / Trace Explorer
-
-Allows engineers to locate individual traces.
-
----
-
-# 90. Configure Grafana Correlation
-
-Grafana should have these datasources:
-
-```text
-Prometheus
-Loki
-Tempo
-```
-
-Recommended correlation:
-
-```text
-Metric
-  |
-  v
-Trace
-  |
-  v
-Logs
+Namespace: devsecops-blue
+
+user-service-blue
+frontend-blue
+product-service-blue
+order-service-blue
 ```
 
 and:
 
 ```text
-Log
-  |
-  v
-Trace ID
-  |
-  v
-Tempo
+Namespace: devsecops-green
+
+user-service-green
+frontend-green
+product-service-green
+order-service-green
 ```
 
-The objective is to move from a failed request to:
+Both environments can exist simultaneously.
 
 ```text
-Metrics
-   -> Trace
-      -> Application Logs
+                         ALB
+                          |
+                    HTTPRoute
+                          |
+              +-----------+-----------+
+              |                       |
+              v                       v
+          BLUE TG                 GREEN TG
+              |                       |
+        +-----+-----+           +-----+-----+
+        |     |     |           |     |     |
+       Pod   Pod   Pod          Pod   Pod   Pod
 ```
 
-without manually searching multiple systems.
-
----
-
-# 91. Blue/Green Deployment Validation
-
-When a new `user-service` version is deployed through Argo Rollouts, the new version should first receive traffic through:
+Initially:
 
 ```text
-user-service-preview
+HTTPRoute
+     |
+     v
+BLUE
 ```
 
-The stable production service remains:
+Green is deployed but receives no production traffic.
+
+---
+
+# 19. Initial State — Blue Is Active
 
 ```text
-user-service
+                    Route 53
+                        |
+                        v
+                       ALB
+                        |
+                        v
+                 HTTPS Listener
+                        |
+                        v
+                 HTTPRoute
+                        |
+                        v
+               user-service-blue
+                        |
+                        v
+                  Target Group
+                     BLUE
+                        |
+              +---------+---------+
+              |         |         |
+              v         v         v
+           Pod Blue  Pod Blue  Pod Blue
 ```
 
-Do not promote the new version immediately.
-
----
-
-# 92. Test the Preview Version
-
-Create a temporary curl pod:
-
-```bash
-kubectl run curl-test \
-  -n devsecops \
-  --rm -it \
-  --image=curlimages/curl \
-  -- sh
-```
-
-From inside the pod:
-
-```bash
-curl -i \
-  http://user-service-preview:8081/actuator/health
-```
-
-Expected result:
+Green exists separately:
 
 ```text
-HTTP 200
-```
-
-Test registration:
-
-```bash
-curl -i -X POST \
-  http://user-service-preview:8081/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "BlueGreen",
-    "email": "bluegreen@example.com",
-    "password": "Test@123"
-  }'
-```
-
-If the preview version works correctly, promote it.
-
-Promotion can be performed from the Argo CD/Argo Rollouts UI or CLI according to the configured rollout strategy.
-
----
-
-# 93. Useful Rollout Commands
-
-```bash
-kubectl argo rollouts status \
-  user-service \
-  -n devsecops
-```
-
-```bash
-kubectl argo rollouts get rollout \
-  user-service \
-  -n devsecops
-```
-
-```bash
-kubectl argo rollouts get rollout \
-  user-service \
-  -n devsecops \
-  --watch
-```
-
-Inspect services:
-
-```bash
-kubectl get svc \
-  user-service \
-  user-service-preview \
-  -n devsecops
-```
-
-Inspect endpoints:
-
-```bash
-kubectl get endpoints \
-  user-service \
-  user-service-preview \
-  -n devsecops
-```
-
----
-
-# 94. Create a Temporary Kubernetes Network Test Pod
-
-Run from Bastion:
-
-```bash
-kubectl run network-test \
-  -n devsecops \
-  --rm -it \
-  --image=curlimages/curl \
-  --restart=Never \
-  -- sh
-```
-
-This pod is useful for testing:
-
-- service DNS
-- service ports
-- HTTP health endpoints
-- application-to-application connectivity
-- RDS connectivity indirectly through application behavior
-
----
-
-# 95. Backend Health Checks
-
-From an appropriate test pod:
-
-```bash
-curl -i http://user-service:8081/actuator/health
-
-curl -i http://product-service:8082/actuator/health
-
-curl -i http://order-service:8083/actuator/health
-
-curl -i http://product-service:8082/api/products
-```
-
-Also test the ALB endpoint if one is available:
-
-```bash
-curl -I http://<ALB_ENDPOINT>/
-```
-
-Do not permanently depend on generated ALB DNS names in documentation. ALB names can change.
-
----
-
-# 96. Test User Registration
-
-Example:
-
-```bash
-curl -v -X POST \
-  http://<ALB_ENDPOINT>/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "EKS User",
-    "email": "eksuser@example.com",
-    "password": "Test@12345"
-  }'
-```
-
----
-
-# 97. Test User Login
-
-```bash
-curl -v -X POST \
-  http://<ALB_ENDPOINT>/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "eksuser@example.com",
-    "password": "Test@12345"
-  }'
-```
-
-The response should contain the authentication token.
-
----
-
-# 98. Get a Token Automatically
-
-Create a user from the application UI first.
-
-Example:
-
-```text
-https://dev.<YOUR_DOMAIN>/login
-```
-
-Then:
-
-```bash
-TOKEN=$(curl -s -X POST \
-  http://<ALB_ENDPOINT>/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email":"<USER_EMAIL>",
-    "password":"<USER_PASSWORD>"
-  }' | jq -r '.token')
-```
-
-Verify:
-
-```bash
-echo "$TOKEN"
-```
-
-Do not put real JWT tokens in Git or README files.
-
----
-
-# 99. Create a Product
-
-Use the token:
-
-```bash
-curl -i \
-  -X POST \
-  http://<ALB_ENDPOINT>/api/products \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{
-    "name": "DevSecOps Laptop",
-    "description": "Test product for EKS deployment",
-    "price": 75000,
-    "quantity": 10
-  }'
-```
-
-Verify products:
-
-```bash
-curl -i \
-  http://<ALB_ENDPOINT>/api/products
-```
-
----
-
-# 100. Create an Order
-
-Example:
-
-```bash
-curl -v -X POST \
-  http://<ALB_ENDPOINT>/api/orders \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{
-    "productId": 1,
-    "quantity": 2
-  }'
-```
-
----
-
-# 101. Final Public DNS Configuration
-
-After:
-
-- EKS is healthy
-- Argo CD is synchronized
-- Argo Rollouts are healthy
-- Gateway API is working
-- AWS Load Balancer Controller is healthy
-- ACM certificate is valid
-- application is reachable
-
-Create a Route 53 record:
-
-```text
-Name:
-devsecops.<YOUR_DOMAIN>
-
-Type:
-A
-
-Alias:
-Yes
-
-Target:
-ALB endpoint
-```
-
-Then access:
-
-```text
-https://devsecops.<YOUR_DOMAIN>
-```
-
----
-
-# 102. Final End-to-End Application Test
-
-Perform this sequence:
-
-```text
-1. Open HTTPS application URL
+user-service-green
         |
         v
-2. Register a user
+Green Target Group
         |
         v
-3. Login
-        |
-        v
-4. Obtain JWT
-        |
-        v
-5. Create a product
-        |
-        v
-6. List products
-        |
-        v
-7. Create an order
-        |
-        v
-8. Verify backend logs in Loki
-        |
-        v
-9. Verify application metrics in Prometheus
-        |
-        v
-10. Verify traces in Tempo
-        |
-        v
-11. Verify Grafana correlation
+Green Pods
 ```
+
+but production HTTPRoute is not pointing to Green.
 
 ---
 
-# 103. Full Deployment Order
+# 20. GitHub Actions CD Deployment
 
-This is the recommended order. Do not randomly install components.
+Your CD workflow first deploys Green.
+
+Conceptually:
 
 ```text
-PHASE 1 — AWS FOUNDATION
-    |
-    +-- AWS CLI
-    +-- VPC
-    +-- Internet Gateway
-    +-- Public Subnets
-    +-- Private Subnets
-    +-- Data Subnets
-    +-- NAT Gateway
-    +-- Route Tables
-    +-- Security Groups
-    |
-    v
-
-PHASE 2 — EC2 ADMINISTRATION
-    |
-    +-- Bastion
-    +-- Jenkins
-    +-- Bastion tools
-    +-- Jenkins tools
-    |
-    v
-
-PHASE 3 — DATA AND CONTAINER REGISTRY
-    |
-    +-- ECR
-    +-- RDS MySQL
-    +-- Database creation
-    |
-    v
-
-PHASE 4 — KUBERNETES
-    |
-    +-- EKS
-    +-- kubectl
-    +-- eksctl
-    +-- kubeconfig
-    |
-    v
-
-PHASE 5 — KUBERNETES AWS INTEGRATION
-    |
-    +-- OIDC
-    +-- Pod Identity Agent
-    +-- Cluster Autoscaler
-    +-- Gateway API
-    +-- AWS Load Balancer Controller
-    +-- EBS CSI
-    |
-    v
-
-PHASE 6 — CI/CD SECURITY
-    |
-    +-- Jenkins
-    +-- Maven
-    +-- SonarQube
-    +-- Trivy
-    +-- Gitleaks
-    +-- GitHub SSH
-    |
-    v
-
-PHASE 7 — GITOPS
-    |
-    +-- Argo CD
-    +-- GitHub repository
-    +-- devsecops namespace
-    +-- RDS Kubernetes Secret
-    |
-    v
-
-PHASE 8 — DEPLOYMENT STRATEGY
-    |
-    +-- Argo Rollouts
-    +-- Stable service
-    +-- Preview service
-    +-- Manual promotion
-    |
-    v
-
-PHASE 9 — OBSERVABILITY
-    |
-    +-- Prometheus
-    +-- Alertmanager
-    +-- Grafana
-    +-- Loki
-    +-- Grafana Alloy
-    +-- Tempo
-    |
-    v
-
-PHASE 10 — PUBLIC APPLICATION
-    |
-    +-- Gateway
-    +-- ALB
-    +-- ACM
-    +-- Route 53
-    +-- HTTPS
-    |
-    v
-
-PHASE 11 — VALIDATION
-    |
-    +-- Registration
-    +-- Login
-    +-- Product creation
-    +-- Order creation
-    +-- Metrics
-    +-- Logs
-    +-- Traces
-    +-- Blue/Green promotion
+GitHub Actions
+      |
+      v
+Deploy Green manifests
+      |
+      v
+Kubernetes
+      |
+      v
+Green Pods created
+      |
+      v
+Services / EndpointSlices
+      |
+      v
+AWS Load Balancer Controller
+      |
+      v
+Green Target Group
+      |
+      v
+Green Pod IPs registered
 ```
 
----
-
-# 104. Operational Verification Checklist
-
-## AWS
-
-- [ ] VPC exists
-- [ ] Public subnets exist in two AZs
-- [ ] Private subnets exist in two AZs
-- [ ] Data subnets exist in two AZs
-- [ ] Internet Gateway attached
-- [ ] NAT Gateway available
-- [ ] Route tables are correct
-- [ ] Security groups restrict access correctly
-
-## EC2
-
-- [ ] Bastion is reachable by SSH
-- [ ] Jenkins is reachable from Bastion
-- [ ] Docker is running
-- [ ] Jenkins is running
-- [ ] SonarQube is running
-
-## EKS
-
-- [ ] EKS cluster is ACTIVE
-- [ ] Nodes are Ready
-- [ ] kubeconfig works
-- [ ] Pod Identity Agent is running
-- [ ] EBS CSI is healthy
-- [ ] Cluster Autoscaler is healthy
-- [ ] Gateway API CRDs exist
-- [ ] AWS Load Balancer Controller is healthy
-
-## CI/CD
-
-- [ ] Jenkins can clone GitHub
-- [ ] Maven build works
-- [ ] Gitleaks works
-- [ ] SonarQube analysis works
-- [ ] Trivy scan works
-- [ ] Docker build works
-- [ ] ECR login works
-- [ ] Images are pushed to ECR
-
-## GitOps
-
-- [ ] Argo CD is healthy
-- [ ] GitHub repository is connected
-- [ ] `devsecops-app` exists
-- [ ] Application is Synced
-- [ ] Application is Healthy
-
-## Database
-
-- [ ] RDS is Available
-- [ ] Bastion can connect to RDS
-- [ ] `userdb` exists
-- [ ] `productdb` exists
-- [ ] `orderdb` exists
-- [ ] EKS workloads can reach RDS
-- [ ] RDS SG allows only required sources
-
-## Rollouts
-
-- [ ] Argo Rollouts controller is healthy
-- [ ] `user-service` rollout exists
-- [ ] Preview service exists
-- [ ] Preview health check succeeds
-- [ ] New version can be manually promoted
-- [ ] Stable service points to promoted version
-
-## Monitoring
-
-- [ ] Prometheus is healthy
-- [ ] Alertmanager is healthy
-- [ ] Gmail test alert succeeds
-- [ ] Grafana is accessible
-- [ ] Loki is healthy
-- [ ] Alloy pods are running
-- [ ] Tempo is healthy
-- [ ] Loki S3 access works
-- [ ] Tempo S3 access works
-- [ ] Grafana can query Prometheus
-- [ ] Grafana can query Loki
-- [ ] Grafana can query Tempo
-
-## Application
-
-- [ ] HTTPS works
-- [ ] Registration works
-- [ ] Login works
-- [ ] Product creation works
-- [ ] Product listing works
-- [ ] Order creation works
-- [ ] Application logs appear in Loki
-- [ ] Metrics appear in Prometheus
-- [ ] Traces appear in Tempo
-
----
-
-# 105. Troubleshooting Guide
-
-## Jenkins is not starting
-
-```bash
-systemctl status jenkins
-journalctl -u jenkins -n 100 --no-pager
-ss -lntp | grep 8080
-java -version
-```
-
-Check that Java 21 is configured correctly.
-
----
-
-## Docker permission problem in Jenkins
-
-```bash
-id jenkins
-getent group docker
-```
-
-If Jenkins was added to the Docker group, restart Jenkins:
-
-```bash
-systemctl restart jenkins
-```
-
----
-
-## ECR login fails
-
-Check:
-
-```bash
-aws sts get-caller-identity
-```
-
-Then:
-
-```bash
-aws ecr get-login-password --region ap-south-1 \
-  | docker login \
-  --username AWS \
-  --password-stdin <AWS_ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com
-```
-
----
-
-## EKS nodes are not Ready
-
-Check:
-
-```bash
-kubectl get nodes
-kubectl describe node <NODE_NAME>
-kubectl get pods -A
-```
-
-Also inspect:
-
-- subnet routing
-- NAT Gateway
-- node security groups
-- IAM permissions
-- EKS cluster status
-
----
-
-## Application cannot connect to RDS
-
-Check:
-
-```bash
-kubectl get secret devsecops-secrets -n devsecops
-kubectl get pods -n devsecops
-```
-
-Confirm:
+At this point:
 
 ```text
-DB_HOST
-DB_PORT
-DB_USERNAME
-DB_PASSWORD
+BLUE = ACTIVE
+GREEN = INACTIVE
 ```
 
-Then check RDS security group access.
+but both are healthy.
 
-Required flow:
+---
+
+# 21. Green Validation
+
+Before switching production traffic, CD should verify:
 
 ```text
-EKS workload/node SG
-       |
-       | TCP 3306
-       v
-devsecops-rds-sg
+Green Deployment
        |
        v
-RDS MySQL
+Pods Running
+       |
+       v
+Readiness checks
+       |
+       v
+Service endpoints
+       |
+       v
+ALB Target Group
+       |
+       v
+Targets healthy
+       |
+       v
+Application smoke tests
 ```
 
----
-
-## Argo CD application is OutOfSync
-
-Check:
-
-```bash
-kubectl get application devsecops-app -n argocd
-```
-
-Then inspect the Argo CD UI for:
-
-- Git repository error
-- SSH key error
-- invalid YAML
-- namespace error
-- image pull error
-- missing CRD
-- invalid Kubernetes resource
-
----
-
-## Rollout is stuck
-
-```bash
-kubectl argo rollouts get rollout \
-  user-service \
-  -n devsecops
-```
-
-Then:
-
-```bash
-kubectl describe rollout user-service -n devsecops
-kubectl get pods -n devsecops
-kubectl get rs -n devsecops
-kubectl get endpoints -n devsecops
-```
-
-Test preview:
-
-```bash
-kubectl run curl-test \
-  -n devsecops \
-  --rm -it \
-  --image=curlimages/curl \
-  -- sh
-```
-
-Then:
-
-```bash
-curl -i http://user-service-preview:8081/actuator/health
-```
-
----
-
-## Loki receives no logs
-
-Check Alloy:
-
-```bash
-kubectl get pods -n alloy
-
-kubectl logs \
-  -n alloy \
-  -l app.kubernetes.io/name=alloy \
-  --tail=100
-```
-
-Check Loki:
-
-```bash
-kubectl get pods -n loki
-kubectl get svc -n loki
-```
-
-Check S3 permissions and Pod Identity.
-
----
-
-## Tempo receives no traces
-
-Check:
-
-```bash
-kubectl get pods -n tempo
-
-kubectl logs \
-  -n tempo \
-  tempo-0 \
-  --tail=100
-```
-
-Check application OTEL environment:
-
-```bash
-kubectl exec -n devsecops deploy/user-service -- env | grep OTEL
-```
-
-Repeat for product and order services.
-
----
-
-## Grafana cannot query Loki
-
-Verify Loki service:
-
-```bash
-kubectl get svc -n loki
-```
-
-Expected service DNS used by Grafana:
+Example:
 
 ```text
-loki-gateway.loki.svc.cluster.local
-```
-
----
-
-## Grafana cannot query Tempo
-
-Verify:
-
-```bash
-kubectl get svc -n tempo
-```
-
-Expected Tempo query endpoint in this configuration:
-
-```text
-http://tempo.tempo.svc.cluster.local:3200
-```
-
----
-
-# 106. Important Design Rules
-
-## Rule 1 — Git is the source of truth
-
-Do not manually change application deployments in the cluster when Argo CD owns those resources.
-
-Change:
-
-```text
-Git
-  -> Argo CD
-  -> Kubernetes
-```
-
-not:
-
-```text
-kubectl edit deployment
-```
-
-for normal application changes.
-
----
-
-## Rule 2 — Jenkins builds; Argo CD deploys
-
-Jenkins is responsible for CI:
-
-```text
-Build
-Test
-Scan
-Package
-Push image
-Update Git
-```
-
-Argo CD is responsible for CD/GitOps:
-
-```text
-Read Git
-Compare desired state
-Synchronize Kubernetes
-```
-
-This separation is intentional.
-
----
-
-## Rule 3 — Do not expose private services
-
-Jenkins and RDS should remain private.
-
-The Bastion is the administrative entry point.
-
----
-
-## Rule 4 — Never commit secrets
-
-Do not commit:
-
-```text
-AWS keys
-AWS secret keys
-RDS passwords
-Gmail app passwords
-SonarQube tokens
-JWT secrets
-Jenkins passwords
-Argo CD passwords
-JWT access tokens
-SSH private keys
-```
-
----
-
-## Rule 5 — Use placeholders in documentation
-
-Use:
-
-```text
-<AWS_ACCOUNT_ID>
-<RDS_ENDPOINT>
-<RDS_PASSWORD>
-<ACM_CERTIFICATE_ARN>
-<GITHUB_REPOSITORY>
-<DOMAIN>
-```
-
-Never use real production credentials in README files.
-
----
-
-# 107. Final Architecture
-
-The completed platform should look like this:
-
-```text
-                             USERS
-                               |
-                               v
-                         Route 53 DNS
-                               |
-                               v
-                         ACM HTTPS/TLS
-                               |
-                               v
-                     AWS Load Balancer
-                               |
-                               v
-                     Kubernetes Gateway API
-                               |
-                               v
-                         EKS Cluster
-                               |
-        +----------------------+----------------------+
-        |                      |                      |
-        v                      v                      v
-    Frontend              Microservices          Observability
-                              |                      |
-                    +---------+---------+       +----+-----+
-                    |         |         |       |    |    |
-                    v         v         v       v    v    v
-                  User     Product     Order   Prom  Loki Tempo
-                    |         |         |       |    ^    ^
-                    +---------+---------+       |    |    |
-                              |                 |  Alloy  |
-                              v                 |         |
-                         RDS MySQL             |    OTEL |
-                                                |         |
-                                                +----+----+
-                                                     |
-                                                   Grafana
-                                                     |
-                                      +--------------+--------------+
-                                      |              |              |
-                                   Metrics          Logs          Traces
-                                      |              |              |
-                                  Prometheus        Loki          Tempo
-                                                     |              |
-                                                     v              v
-                                                    S3             S3
-
-
-                         CI/CD + GitOps
-                         ==============
-
-Developer
+Green Pods
    |
-   v
-GitHub
+   +---- Ready
    |
-   v
-Jenkins
+   +---- Health check OK
    |
-   +--> Maven
-   +--> Gitleaks
-   +--> SonarQube
-   +--> Trivy
-   +--> Docker
+   +---- ALB target healthy
    |
-   v
-Amazon ECR
-   |
-   v
-Git/Kustomize
-   |
-   v
-Argo CD
-   |
-   v
+   +---- Application test successful
+```
+
+Only after validation should the traffic switch occur.
+
+---
+
+# 22. The Actual Blue → Green Traffic Switch
+
+This is the critical part.
+
+Before:
+
+```yaml
+backendRefs:
+  - name: user-service-blue
+    port: 8080
+```
+
+GitHub Actions changes the Kubernetes HTTPRoute to:
+
+```yaml
+backendRefs:
+  - name: user-service-green
+    port: 8080
+```
+
+The change is:
+
+```text
+GitHub Actions
+      |
+      v
+kubectl patch/apply HTTPRoute
+      |
+      v
+Kubernetes API Server
+      |
+      v
+HTTPRoute updated
+      |
+      v
+AWS Load Balancer Controller
+      |
+      v
+Reconciliation
+      |
+      v
+AWS ALB Listener Rule updated
+      |
+      v
+Traffic now forwarded to
+GREEN Target Group
+```
+
+The ALB itself is not necessarily recreated.
+
+The important change is the routing configuration associated with the existing ALB.
+
+---
+
+# 23. What Happens Inside the Controller
+
+Conceptually:
+
+```text
+HTTPRoute changed
+
+backendRefs:
+    BLUE
+      ↓
+    GREEN
+
+        |
+        v
+
+AWS Load Balancer Controller
+        |
+        +-----------------------------+
+        |                             |
+        v                             v
+Find Gateway                   Find backend Service
+        |                             |
+        v                             v
+Find ALB                       Find EndpointSlices
+        |                             |
+        +-------------+---------------+
+                      |
+                      v
+              Build desired state
+                      |
+                      v
+             Compare AWS state
+                      |
+                      v
+              AWS API operations
+```
+
+The controller then makes AWS state match the Kubernetes desired state.
+
+---
+
+# 24. Does the Controller Change Pod IPs?
+
+**No.**
+
+This distinction is extremely important.
+
+The controller does **not** assign Pod IPs.
+
+Pod IP lifecycle belongs to:
+
+```text
 EKS
-   |
-   v
-Argo Rollouts
-   |
-   +--> Preview
-   |
-   +--> Validation
-   |
-   +--> Manual Promotion
-   |
-   v
-Production
+Kubernetes
+VPC CNI
+Scheduler
+CNI/IP allocation
+```
+
+The controller discovers/reconciles which Pod IPs should be registered as ALB targets.
+
+Therefore:
+
+```text
+Who creates Pod?
+
+Kubernetes Deployment / ReplicaSet
+        |
+        v
+Pod
+
+Who assigns Pod IP?
+
+EKS networking / VPC CNI
+
+Who exposes Pod through Service?
+
+Kubernetes Service
+
+Who maintains endpoint list?
+
+Kubernetes EndpointSlice
+
+Who registers targets into AWS Target Group?
+
+AWS Load Balancer Controller
+```
+
+That is the clean separation of responsibilities.
+
+---
+
+# 25. Does the Controller Change the Target Group?
+
+**It can create, configure, update, and reconcile Target Groups as required by the desired Gateway/route/backend state.**
+
+But don't think:
+
+```text
+HTTPRoute changed
+      =
+Target Group destroyed
+      =
+new Target Group created
+```
+
+That is not the correct general mental model.
+
+A better model is:
+
+```text
+Kubernetes desired state
+        |
+        v
+Controller determines
+required AWS resources
+        |
+        v
+Create/update/reuse resources
+        |
+        v
+Reconcile target registrations
+```
+
+Depending on the resource graph and changes, the controller may reuse existing AWS resources or create/update resources.
+
+---
+
+# 26. Blue-Green Traffic Switch — Full Flow
+
+Here is the complete flow:
+
+```text
+                    GitHub Actions
+                         |
+                         |
+                  CD deployment
+                         |
+                         v
+               Deploy GREEN version
+                         |
+                         v
+                 Kubernetes API
+                         |
+                         v
+                  Green Deployment
+                         |
+                         v
+                    Green Pods
+                         |
+                         v
+                   Pod IPs created
+                         |
+                         v
+                    Service
+                         |
+                         v
+                  EndpointSlice
+                         |
+                         v
+             AWS Load Balancer Controller
+                         |
+                         v
+                 Green Target Group
+                         |
+                         v
+                Green targets healthy
+                         |
+                         v
+              Smoke / health validation
+                         |
+                         v
+              Update HTTPRoute
+              BLUE → GREEN
+                         |
+                         v
+             Kubernetes API Server
+                         |
+                         v
+             AWS Load Balancer Controller
+                         |
+                         v
+                  Reconciliation
+                         |
+                         v
+                 AWS ALB Listener
+                         |
+                         v
+               Green Target Group
+                         |
+                         v
+                    Green Pods
 ```
 
 ---
 
-# 108. What "Done" Means
+# 27. What Does NOT Change During the Switch
 
-The implementation is complete only when all of the following are true:
+This is just as important.
+
+Normally the following remain unchanged:
 
 ```text
-AWS
-  |
-  +-- Network works
-  +-- Private/public separation works
-  +-- EKS works
-  +-- RDS works
-  +-- ECR works
+Route 53
+   |
+   v
+ALB DNS name
+```
 
-CI
-  |
-  +-- Jenkins works
-  +-- Maven works
-  +-- Gitleaks works
-  +-- SonarQube works
-  +-- Trivy works
-  +-- Docker image reaches ECR
+The ALB itself can remain the same.
 
-CD
-  |
-  +-- Argo CD works
-  +-- Git repository sync works
-  +-- Kustomize deployment works
-  +-- Argo Rollouts works
-  +-- Preview validation works
-  +-- Manual promotion works
+The Gateway can remain the same.
 
-Observability
-  |
-  +-- Prometheus collects metrics
-  +-- Alertmanager sends Gmail alerts
-  +-- Grafana displays metrics
-  +-- Alloy collects logs
-  +-- Loki stores/searches logs
-  +-- Tempo stores/searches traces
-  +-- Grafana correlates metrics/logs/traces
+The listeners can remain the same.
 
-Application
-  |
-  +-- HTTPS works
-  +-- User registration works
-  +-- Login works
-  +-- Product creation works
-  +-- Product listing works
-  +-- Order creation works
+The production hostname remains the same.
+
+For example:
+
+```text
+api.example.com
+```
+
+still resolves to the same ALB.
+
+The switch occurs further downstream:
+
+```text
+ALB
+ |
+ v
+Listener
+ |
+ v
+Listener Rule
+ |
+ v
+Target Group
+```
+
+The route's backend changes from:
+
+```text
+BLUE
+```
+
+to:
+
+```text
+GREEN
 ```
 
 ---
 
-# 109. Project Completion Flow
+# 28. Before and After
 
-The final operating model is:
+## Before Switch
 
 ```text
-Developer pushes code
-        |
-        v
-GitHub
-        |
-        v
-Jenkins
-        |
-        +--> Build
-        +--> Test
-        +--> Gitleaks
-        +--> SonarQube
-        +--> Trivy
-        +--> Docker Build
-        +--> ECR Push
-        |
-        v
-Git/Kustomize update
-        |
-        v
-Argo CD
-        |
-        v
-EKS
-        |
-        v
-Argo Rollouts
-        |
-        +--> Preview deployment
-        |
-        +--> Health/API validation
-        |
-        +--> Manual promotion
-        |
-        v
-Production
-        |
-        +--> Prometheus
-        +--> Loki
-        +--> Tempo
-        +--> Grafana
-        |
-        v
-Operational visibility
+Route 53
+   |
+   v
+ALB
+   |
+   v
+Listener :443
+   |
+   v
+HTTPRoute
+   |
+   v
+user-service-blue
+   |
+   v
+Blue Target Group
+   |
+   +---- 10.0.1.10
+   +---- 10.0.2.20
+   +---- 10.0.3.30
 ```
 
-This is the intended end state of the DevSecOps project.
+Green:
+
+```text
+user-service-green
+       |
+       v
+Green Target Group
+       |
+       +---- 10.0.4.10
+       +---- 10.0.5.20
+       +---- 10.0.6.30
+
+No production traffic
+```
+
+---
+
+## After Switch
+
+```text
+Route 53
+   |
+   v
+ALB
+   |
+   v
+Listener :443
+   |
+   v
+HTTPRoute
+   |
+   v
+user-service-green
+   |
+   v
+Green Target Group
+   |
+   +---- 10.0.4.10
+   +---- 10.0.5.20
+   +---- 10.0.6.30
+```
+
+Blue remains available:
+
+```text
+Blue Target Group
+       |
+       +---- 10.0.1.10
+       +---- 10.0.2.20
+       +---- 10.0.3.30
+```
+
+This is what gives you the ability to roll back quickly.
+
+---
+
+# 29. Rollback
+
+Suppose Green becomes unhealthy after the switch.
+
+The CD workflow can change:
+
+```text
+GREEN
+  ↓
+BLUE
+```
+
+by changing the HTTPRoute backend reference back.
+
+```text
+GitHub Actions
+      |
+      v
+HTTPRoute
+      |
+      | backendRefs
+      v
+GREEN → BLUE
+      |
+      v
+Kubernetes API
+      |
+      v
+AWS Load Balancer Controller
+      |
+      v
+ALB listener rule reconciliation
+      |
+      v
+BLUE Target Group
+      |
+      v
+Blue Pods
+```
+
+This is much faster than redeploying Blue.
+
+Blue is already running.
+
+---
+
+# 30. Automatic Rollback Logic
+
+A good CD pipeline should conceptually look like this:
+
+```text
+                    START
+                      |
+                      v
+             Deploy GREEN
+                      |
+                      v
+             Wait for rollout
+                      |
+                      v
+            Pods Ready?
+             /        \
+           NO          YES
+           |             |
+           v             v
+       ROLLBACK      Validate ALB
+                         |
+                         v
+                  Targets Healthy?
+                    /          \
+                  NO            YES
+                  |               |
+                  v               v
+              ROLLBACK       Smoke Test
+                                |
+                                v
+                         Smoke Test OK?
+                          /          \
+                        NO            YES
+                        |               |
+                        v               v
+                    ROLLBACK       SWITCH
+                                      |
+                                      v
+                               BLUE → GREEN
+                                      |
+                                      v
+                              Monitor / Verify
+                                      |
+                                      v
+                              Production OK?
+                               /          \
+                             NO            YES
+                             |               |
+                             v               v
+                          ROLLBACK          DONE
+                             |
+                             v
+                         GREEN → BLUE
+```
+
+---
+
+# 31. Important: What Does "Rollback" Actually Mean?
+
+In your architecture, rollback should primarily mean:
+
+```text
+Change HTTPRoute backend
+
+GREEN
+  ↓
+BLUE
+```
+
+It does not necessarily mean:
+
+```text
+Delete Green
+Redeploy Blue
+Recreate ALB
+Change Route53
+```
+
+That would defeat much of the purpose of blue-green deployment.
+
+The fastest rollback is:
+
+```text
+HTTPRoute:
+
+GREEN → BLUE
+```
+
+provided Blue is still healthy and available.
+
+---
+
+# 32. Full Resource Relationship
+
+The complete Kubernetes/AWS relationship can be visualized as:
+
+```text
+                    GatewayClass
+                         |
+                         | controllerName
+                         v
+              AWS Load Balancer Controller
+                         |
+                         v
+                      Gateway
+                         |
+                         | creates/manages
+                         v
+                        ALB
+                         |
+                         | Listener
+                         v
+                     HTTPRoute
+                         |
+                         | backendRefs
+                         v
+                      Service
+                         |
+                         v
+                    EndpointSlice
+                         |
+                         v
+                       TGB
+                         |
+                         v
+                  AWS Target Group
+                         |
+                         v
+                     Pod IPs
+```
+
+And alongside this:
+
+```text
+TGC
+ |
+ +---- targetType
+ |
+ +---- health checks
+ |
+ +---- target group attributes
+ |
+ +---- target group customization
+```
+
+---
+
+# 33. More Accurate Internal Model
+
+It is useful to think about two separate control planes.
+
+## Kubernetes control plane
+
+```text
+GitHub Actions
+      |
+      v
+Kubernetes API
+      |
+      +---- GatewayClass
+      |
+      +---- Gateway
+      |
+      +---- HTTPRoute
+      |
+      +---- Service
+      |
+      +---- EndpointSlice
+      |
+      +---- TGC
+      |
+      +---- TGB
+```
+
+## AWS control plane
+
+```text
+AWS Load Balancer Controller
+             |
+             v
+          AWS APIs
+             |
+      +------+------+
+      |             |
+      v             v
+     ALB       Target Groups
+      |             |
+      |             v
+      |        Registered Pods
+      |
+      v
+Listeners
+      |
+      v
+Listener Rules
+```
+
+The AWS Load Balancer Controller is the bridge between these two worlds.
+
+---
+
+# 34. The Reconciliation Loop
+
+The controller's job is essentially:
+
+```text
+           Desired State
+                |
+                v
+       Kubernetes Resources
+                |
+                v
+       AWS Load Balancer
+          Controller
+                |
+                v
+         Current AWS State
+                |
+                v
+       Compare desired vs
+          actual state
+                |
+          +-----+-----+
+          |           |
+       Same        Different
+          |           |
+          v           v
+        Wait       Reconcile
+                      |
+                      v
+                  AWS APIs
+                      |
+                      v
+               New AWS state
+```
+
+Then it repeats.
+
+This is why manually changing AWS resources behind the controller is a bad idea.
+
+For example:
+
+```text
+AWS Console
+   |
+   v
+Manually change listener
+```
+
+while Kubernetes says:
+
+```text
+HTTPRoute → GREEN
+```
+
+The controller can reconcile AWS back toward the Kubernetes desired state.
+
+**Kubernetes resources should be treated as the source of truth.**
+
+---
+
+# 35. What GitHub Actions Actually Controls
+
+Your CD pipeline should primarily control:
+
+```text
+Application deployment
+        |
+        v
+Kubernetes manifests
+        |
+        v
+Green environment
+        |
+        v
+Validation
+        |
+        v
+HTTPRoute backendRef
+        |
+        v
+Traffic switch
+```
+
+It should NOT need to directly control:
+
+```text
+AWS ALB listener APIs
+AWS TargetGroup APIs
+AWS RegisterTargets API
+```
+
+The AWS Load Balancer Controller handles that infrastructure reconciliation.
+
+This is cleaner and much safer.
+
+---
+
+# 36. Complete Blue-Green Sequence
+
+For your DevSecOps platform, the end-to-end sequence can be represented as:
+
+```text
+                    USER
+                     |
+                     v
+              api.example.com
+                     |
+                     v
+                  Route53
+                     |
+                     v
+                    ALB
+                     |
+                     v
+              ALB HTTPS Listener
+                     |
+                     v
+              HTTPRoute Rule
+                     |
+              +------+------+
+              |             |
+           BLUE active    GREEN inactive
+              |             |
+              v             v
+        Blue Target      Green Target
+          Group            Group
+              |             |
+              v             v
+          Blue Pods      Green Pods
+```
+
+Then CD starts:
+
+```text
+GitHub Actions
+      |
+      v
+Build image
+      |
+      v
+Push image to ECR
+      |
+      v
+Deploy GREEN
+      |
+      v
+Green Pods
+      |
+      v
+EndpointSlices
+      |
+      v
+ALB Controller
+      |
+      v
+Green Target Group
+      |
+      v
+Health checks
+      |
+      v
+Smoke tests
+      |
+      v
+UPDATE HTTPRoute
+      |
+      v
+BLUE → GREEN
+      |
+      v
+ALB Controller
+      |
+      v
+ALB Listener Rule
+      |
+      v
+GREEN Target Group
+      |
+      v
+GREEN Pods
+      |
+      v
+Production traffic
+```
+
+---
+
+# 37. Where TGC Fits in This Flow
+
+TGC does not decide:
+
+```text
+Blue or Green?
+```
+
+That is the job of the route/backend relationship.
+
+Instead, TGC answers questions such as:
+
+```text
+What target type should this Target Group use?
+
+How should health checks behave?
+
+What Target Group attributes should be configured?
+
+What custom Target Group behavior should apply?
+```
+
+For example:
+
+```text
+HTTPRoute
+    |
+    | "send traffic to"
+    v
+user-service-green
+    |
+    v
+Target Group Green
+    ^
+    |
+    | configuration
+    |
+   TGC
+```
+
+---
+
+# 38. Where TGB Fits
+
+TGB is the binding layer:
+
+```text
+Kubernetes Service
+       |
+       |
+       v
+TargetGroupBinding
+       |
+       |
+       v
+AWS Target Group
+```
+
+The controller uses this relationship to manage target registration.
+
+For normal ALBC-managed Gateway resources, you generally don't need to manually write TGB resources because the controller internally uses/creates the binding.
+
+---
+
+# 39. One Critical Distinction
+
+Do not mix these three concepts:
+
+```text
+HTTPRoute
+TargetGroupConfiguration
+TargetGroupBinding
+```
+
+They answer three different questions.
+
+### HTTPRoute
+
+> **Where should HTTP traffic go?**
+
+```text
+/api → user-service-green
+```
+
+### TGC
+
+> **How should the Target Group behave?**
+
+```text
+targetType = ip
+healthCheckPath = /health
+deregistrationDelay = 30
+```
+
+### TGB
+
+> **Which Kubernetes Service is associated with which AWS Target Group?**
+
+```text
+user-service-green
+        ↕
+Green Target Group
+```
+
+---
+
+# 40. Final Architecture
+
+```text
+                              INTERNET
+                                  |
+                                  v
+                            +-----------+
+                            | Route 53  |
+                            +-----+-----+
+                                  |
+                                  | DNS
+                                  v
+                         +-------------------+
+                         |       AWS ALB     |
+                         +---------+---------+
+                                   |
+                              HTTPS :443
+                                   |
+                                   v
+                         +-------------------+
+                         | ALB Listener      |
+                         | / Listener Rules  |
+                         +---------+---------+
+                                   |
+                                   | derived from
+                                   v
+                         +-------------------+
+                         |    HTTPRoute      |
+                         |                   |
+                         | host/path rules   |
+                         | backendRefs       |
+                         +---------+---------+
+                                   |
+                         backendRefs
+                                   |
+                    +--------------+--------------+
+                    |                             |
+                    v                             v
+             BLUE SERVICE                  GREEN SERVICE
+                    |                             |
+                    v                             v
+             BLUE TGB/TG                    GREEN TGB/TG
+                    |                             |
+                    v                             v
+             BLUE TARGETS                   GREEN TARGETS
+                    |                             |
+             +------+------+                +-----+------+
+             |      |      |                |     |      |
+             v      v      v                v     v      v
+           Pod    Pod    Pod              Pod   Pod    Pod
+           IP     IP     IP               IP    IP     IP
+
+
+        Gateway API / AWS Controller Control Plane
+        --------------------------------------------
+
+                    GatewayClass
+                         |
+                         v
+                      Gateway
+                         |
+                         v
+             AWS Load Balancer Controller
+                         |
+              +----------+----------+
+              |                     |
+              v                     v
+        ALB reconciliation    Target reconciliation
+              |                     |
+              v                     v
+        Listeners/rules       Target Groups
+                                    |
+                                    v
+                               Pod IPs
+
+
+        Target Group Configuration
+        ---------------------------
+
+                  TGC
+                   |
+                   +---- targetType
+                   +---- health checks
+                   +---- TG attributes
+                   +---- TG customization
+
+
+        Traffic Switch
+        ---------------
+
+             GitHub Actions CD
+                    |
+                    v
+              HTTPRoute patch
+                    |
+                    v
+             BLUE → GREEN
+                    |
+                    v
+          Kubernetes API Server
+                    |
+                    v
+          AWS Load Balancer Controller
+                    |
+                    v
+             ALB reconciliation
+                    |
+                    v
+             GREEN Target Group
+                    |
+                    v
+                Green Pods
+```
+
+---
+
+# 41. The Most Important Mental Model
+
+If you remember only one thing, remember this:
+
+```text
+GitHub Actions
+      |
+      | changes Kubernetes desired state
+      v
+HTTPRoute
+      |
+      | backendRef
+      v
+Service
+      |
+      | EndpointSlices
+      v
+Pod IPs
+```
+
+And:
+
+```text
+AWS Load Balancer Controller
+      |
+      | watches Kubernetes
+      |
+      +--------------------------+
+      |                          |
+      v                          v
+Gateway / HTTPRoute          Service/Endpoints
+      |                          |
+      v                          v
+ALB Listener/Rules          Target Groups
+                                 |
+                                 v
+                              Pod IPs
+```
+
+Therefore the complete relationship is:
+
+```text
+              GITHUB ACTIONS
+                     |
+                     v
+             Kubernetes API
+                     |
+          +----------+----------+
+          |                     |
+          v                     v
+      HTTPRoute             Deployment
+          |                     |
+          v                     v
+       Service                 Pods
+          |                     |
+          v                     v
+    EndpointSlice           Pod IPs
+          |                     |
+          +----------+----------+
+                     |
+                     v
+          AWS Load Balancer
+             Controller
+                     |
+          +----------+----------+
+          |                     |
+          v                     v
+         ALB              Target Groups
+          |                     |
+          |                     v
+          |                  Pod IPs
+          |
+          v
+      Listener Rules
+          |
+          v
+      HTTP routing
+```
+
+---
+
+# 42. Blue-Green in One Sentence
+
+Your production blue-green mechanism is essentially:
+
+> **GitHub Actions deploys and validates Green, then changes the Kubernetes `HTTPRoute` backend from Blue Service to Green Service; the AWS Load Balancer Controller observes that desired-state change and reconciles the AWS ALB listener/routing configuration so production traffic reaches the Green Target Group and its healthy Pod IPs.**
+
+That is the core mechanism.
+
+And when rollback is required:
+
+```text
+HTTPRoute
+
+GREEN
+  ↓
+BLUE
+
+        ↓
+
+AWS Load Balancer Controller
+        ↓
+ALB listener/rule reconciliation
+        ↓
+Blue Target Group
+        ↓
+Blue Pod IPs
+```
+
+No Route 53 change is required, and no ALB recreation is inherently required.
+
+---
+
+# 43. Operational Debugging Chain
+
+When something goes wrong, troubleshoot from left to right:
+
+```text
+Route53
+   ↓
+ALB
+   ↓
+Listener
+   ↓
+Listener Rule
+   ↓
+Gateway
+   ↓
+HTTPRoute
+   ↓
+Service
+   ↓
+EndpointSlice
+   ↓
+TargetGroupBinding
+   ↓
+Target Group
+   ↓
+Target health
+   ↓
+Pod IP
+   ↓
+Pod
+```
+
+Useful commands:
+
+```bash
+kubectl get gatewayclass
+
+kubectl get gateway -A
+
+kubectl get httproute -A
+
+kubectl describe httproute <name> -n <namespace>
+
+kubectl get svc -n devsecops-blue
+
+kubectl get svc -n devsecops-green
+
+kubectl get endpointslice -n devsecops-blue
+
+kubectl get endpointslice -n devsecops-green
+
+kubectl get targetgroupbindings -A
+
+kubectl describe targetgroupbinding <name> -n <namespace>
+
+kubectl get pods -n devsecops-blue -o wide
+
+kubectl get pods -n devsecops-green -o wide
+```
+
+For the controller:
+
+```bash
+kubectl get pods -n kube-system \
+  -l app.kubernetes.io/name=aws-load-balancer-controller
+
+kubectl logs -n kube-system \
+  -l app.kubernetes.io/name=aws-load-balancer-controller
+```
+
+Then verify AWS:
+
+```text
+ALB
+ ├── Listeners
+ ├── Listener Rules
+ ├── Target Groups
+ └── Target Health
+```
+
+---
+
+# 44. Final Responsibility Matrix
+
+| Component                    | Responsibility                                                             |
+| ---------------------------- | -------------------------------------------------------------------------- |
+| Route 53                     | DNS resolution                                                             |
+| ALB                          | Layer-7 entry point                                                        |
+| ALB Listener                 | Accepts HTTP/HTTPS traffic                                                 |
+| ALB Listener Rule            | Determines which Target Group receives request                             |
+| GatewayClass                 | Selects the Gateway controller                                             |
+| Gateway                      | Defines the ALB/Gateway entry point and listeners                          |
+| HTTPRoute                    | Defines HTTP host/path/backend routing                                     |
+| Service                      | Stable Kubernetes backend abstraction                                      |
+| Deployment                   | Creates/manages Pods                                                       |
+| Pod                          | Runs application                                                           |
+| VPC CNI                      | Provides Pod networking/IPs                                                |
+| EndpointSlice                | Tracks current Service endpoints                                           |
+| TGC                          | Configures Target Group behavior                                           |
+| TGB                          | Binds AWS Target Group to Kubernetes Service                               |
+| AWS Load Balancer Controller | Reconciles Kubernetes Gateway/Service/endpoint state with AWS ALB/TG state |
+| GitHub Actions               | Deploys application and changes desired traffic state                      |
+| ECR                          | Stores application container images                                        |
+
+---
+
+# 45. The One-Line Architecture
+
+```text
+Route53
+  → ALB
+  → Listener
+  → HTTPRoute-derived Listener Rule
+  → Target Group
+  → Pod IP
+  → Application
+```
+
+And the control path is:
+
+```text
+GitHub Actions
+  → Kubernetes API
+  → HTTPRoute / Deployment
+  → AWS Load Balancer Controller
+  → AWS APIs
+  → ALB / Listener Rules / Target Groups / Target Registrations
+```
+
+**That separation is the key to understanding the entire architecture.**
