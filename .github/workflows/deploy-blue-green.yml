@@ -441,10 +441,6 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
 
-    # GitHub Environment protection/approval belongs here.
-    environment:
-      name: production
-
     steps:
 
       # ----------------------------------------------------------
@@ -785,10 +781,12 @@ jobs:
     # - prepare succeeded
     # - production switch or final verification failed
     # - traffic may have been changed
+
     if: >
       always() &&
       needs.prepare.result == 'success' &&
-      (needs.switch.result == 'failure' || needs.verify.result == 'failure')
+      needs.switch.result == 'success' &&
+      needs.verify.result == 'failure'
 
     steps:
 
