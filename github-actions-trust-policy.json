@@ -9,8 +9,8 @@
             "Action": "sts:AssumeRoleWithWebIdentity",
             "Condition": {
                 "StringEquals": {
-                    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-                    "token.actions.githubusercontent.com:sub": "repo:sathish103/devsecops-production-platform:ref:refs/heads/main"
+                    "token.actions.githubusercontent.com:sub": "repo:sathish103@92373259/devsecops-production-platform@1352102312:ref:refs/heads/main",
+                    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
                 }
             }
         }
