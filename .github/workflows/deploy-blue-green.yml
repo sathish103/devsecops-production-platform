@@ -293,10 +293,10 @@ jobs:
           done
 
       # ----------------------------------------------------------
-      # VERIFY PODS
+      # VERIFY CANDIDATE DEPLOYMENTS
       # ----------------------------------------------------------
 
-      - name: Verify candidate pods
+      - name: Verify candidate deployments
         env:
           TARGET_ENV: ${{ steps.environment.outputs.inactive_env }}
         run: |
@@ -305,34 +305,66 @@ jobs:
           NAMESPACE="devsecops-$TARGET_ENV"
 
           echo "========================================="
-          echo "VERIFYING CANDIDATE PODS"
+          echo "VERIFYING CANDIDATE DEPLOYMENTS"
           echo "========================================="
 
-          kubectl get pods \
-            -n "$NAMESPACE" \
-            -o wide
+          for DEPLOYMENT in \
+            frontend-$TARGET_ENV \
+            user-service-$TARGET_ENV \
+            product-service-$TARGET_ENV \
+            order-service-$TARGET_ENV
+          do
+
+            echo
+            echo "-----------------------------------------"
+            echo "Deployment : $DEPLOYMENT"
+            echo "-----------------------------------------"
+
+            READY=$(kubectl get deployment "$DEPLOYMENT" \
+              -n "$NAMESPACE" \
+              -o jsonpath='{.status.readyReplicas}')
+
+            AVAILABLE=$(kubectl get deployment "$DEPLOYMENT" \
+              -n "$NAMESPACE" \
+              -o jsonpath='{.status.availableReplicas}')
+
+            UPDATED=$(kubectl get deployment "$DEPLOYMENT" \
+              -n "$NAMESPACE" \
+              -o jsonpath='{.status.updatedReplicas}')
+
+            DESIRED=$(kubectl get deployment "$DEPLOYMENT" \
+              -n "$NAMESPACE" \
+              -o jsonpath='{.spec.replicas}')
+
+            echo "Desired replicas   : $DESIRED"
+            echo "Updated replicas    : ${UPDATED:-0}"
+            echo "Ready replicas     : ${READY:-0}"
+            echo "Available replicas : ${AVAILABLE:-0}"
+
+            if [[ "${READY:-0}" != "$DESIRED" ]]; then
+              echo
+              echo "ERROR: $DEPLOYMENT is not fully ready."
+              exit 1
+            fi
+
+            if [[ "${AVAILABLE:-0}" != "$DESIRED" ]]; then
+              echo
+              echo "ERROR: $DEPLOYMENT does not have all replicas available."
+              exit 1
+            fi
+
+            if [[ "${UPDATED:-0}" != "$DESIRED" ]]; then
+              echo
+              echo "ERROR: $DEPLOYMENT does not have all replicas updated."
+              exit 1
+            fi
+
+          done
 
           echo
-          echo "Checking pod readiness..."
-
-          READY=$(kubectl get pods \
-            -n "$NAMESPACE" \
-            -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' \
-            | grep -c '^true$' || true)
-
-          NOT_READY=$(kubectl get pods \
-            -n "$NAMESPACE" \
-            -o jsonpath='{range .items[*]}{.status.containerStatuses[0].ready}{"\n"}{end}' \
-            | grep -c '^false$' || true)
-
-          echo
-          echo "Ready pods     : $READY"
-          echo "Not ready pods : $NOT_READY"
-
-          if [[ "$NOT_READY" != "0" ]]; then
-            echo "ERROR: Candidate contains non-ready pods."
-            exit 1
-          fi
+          echo "========================================="
+          echo "ALL CANDIDATE DEPLOYMENTS ARE HEALTHY"
+          echo "========================================="
 
       # ----------------------------------------------------------
       # VERIFY IMAGE VERSION
@@ -903,3 +935,4 @@ jobs:
           echo "ROLLBACK COMPLETE"
           echo "========================================="
           echo "Production restored to: $EXPECTED_ENV"
+
