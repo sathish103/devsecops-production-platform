@@ -1283,55 +1283,29 @@ There is no:
 
 traffic progression in the current CD implementation.
 
-🧠 Blue-Green vs Canary in This Project
+## 🧠 Blue-Green vs Canary in This Project
 
-Feature
-
-Current Implementation
-
-Two production environments
-
-✅
-
-Blue environment
-
-✅
-
-Green environment
-
-✅
-
-New release deployed before switch
-
-✅
-
-Direct 100% switch
-
-✅
-
-Gradual traffic increase
-
-❌
-
-Canary percentages
-
-❌
-
-Candidate validation before switch
-
-✅
-
-Automatic rollback
-
-✅
+| Feature | Current Implementation |
+| --- | --- |
+| Two production environments | ✅ |
+| Blue environment | ✅ |
+| Green environment | ✅ |
+| New release deployed before switch | ✅ |
+| Direct 100% switch | ✅ |
+| Gradual traffic increase | ❌ |
+| Canary percentages | ❌ |
+| Candidate validation before switch | ✅ |
+| Automatic rollback | ✅ |
 
 The architecture can be extended to weighted/canary traffic later, but the current implementation intentionally keeps production traffic switching simple:
 
+```text
 100% OLD
    ↓
 100% NEW
+```
 
-🗂️ Kubernetes Traffic Model
+## 🗂️ Kubernetes Traffic Model
 
 The production namespace contains the HTTPRoutes:
 
@@ -1472,8 +1446,9 @@ AWS
 │
 └── Application Load Balancer
 
-📁 Repository Structure
+## 📁 Repository Structure
 
+```text
 devsecops-production-platform/
 │
 ├── .github/
@@ -1497,24 +1472,25 @@ devsecops-production-platform/
 ├── eksctl-config.yaml
 ├── iam_policy.json
 └── README.md
+```
 
-⚙️ CI Workflow
+## ⚙️ CI Workflow
 
-.github/workflows/ci.yml
+`.github/workflows/ci.yml`
 
 Responsibilities:
 
-✓ Build Java services
-✓ Run tests
-✓ Detect secrets with Gitleaks
-✓ Build Docker images
-✓ Scan images with Trivy
-✓ Authenticate to AWS using OIDC
-✓ Push images to ECR
+- ✓ Build Java services
+- ✓ Run tests
+- ✓ Detect secrets with Gitleaks
+- ✓ Build Docker images
+- ✓ Scan images with Trivy
+- ✓ Authenticate to AWS using OIDC
+- ✓ Push images to ECR
 
-⚙️ CD Workflow
+## ⚙️ CD Workflow
 
-.github/workflows/deploy-blue-green.yml
+`.github/workflows/deploy-blue-green.yml`
 
 Responsibilities:
 
