@@ -15,6 +15,7 @@ This project implements an end-to-end DevSecOps production delivery platform for
 
 The platform automates the complete path from a developer commit to production:
 
+```text
 Developer
    │
    │ git push origin main
@@ -49,7 +50,7 @@ GitHub Actions CD
    │
    ▼
 Amazon EKS Production
-
+```
 The key design principle is:
 
 Deploy first → validate completely → switch 100% traffic → verify → rollback if required.
@@ -255,6 +256,7 @@ Git Commit SHA
 
 The production delivery flow is centered around the main branch.
 
+```text
 Developer
    │
    │ git push
@@ -272,7 +274,7 @@ Developer
    │
    ▼
  Production
-
+```
 The important production rule is:
 
 Only successful CI execution from a push to main
@@ -296,6 +298,7 @@ The CI pipeline answers:
 
 The pipeline performs:
 
+```text
 Source Code
     │
     ▼
@@ -315,7 +318,7 @@ AWS OIDC
     │
     ▼
 Amazon ECR
-
+```
 🧪 CI Stage 1 — Build & Test
 
 Three Java services are built using a matrix strategy:
@@ -343,16 +346,18 @@ Maven
 
 If any service fails:
 
+```text
 CI STOP
    ✕
 No security stage
 No Docker push
 No production deployment
-
+```
 🔎 CI Stage 2 — Gitleaks
 
 After successful tests, Gitleaks scans the repository for accidentally committed secrets.
 
+```text
 Build & Test
      │
      ▼
@@ -364,7 +369,7 @@ FAIL     PASS
  │        │
  ▼        ▼
 STOP    Continue
-
+```
 The objective is to prevent secrets such as credentials, tokens, or keys from progressing through the delivery pipeline.
 
 🐳 CI Stage 3 — Docker Build
@@ -384,6 +389,7 @@ devsecops-user-service:<commit-sha>
 
 This creates the relationship:
 
+```text
 Git Commit
     │
     ▼
@@ -397,7 +403,7 @@ EKS
     │
     ▼
 Production
-
+```
 There is no dependency on a mutable latest tag.
 
 🛡️ CI Stage 4 — Trivy
@@ -434,6 +440,7 @@ GitHub Actions does not require long-lived AWS access keys.
 
 Instead:
 
+```text
 GitHub Actions
       │
       │ OIDC token
@@ -446,7 +453,7 @@ AWS IAM Role
       │
       ▼
 AWS APIs
-
+```
 The GitHub Actions role is:
 
 GitHubActions-DevSecOps-Production
@@ -457,6 +464,7 @@ This role provides the permissions required by the CI/CD workflows.
 
 After all previous stages succeed:
 
+```text
 GitHub Actions
       │
       ▼
@@ -467,7 +475,7 @@ Amazon ECR Login
       │
       ▼
 Push 4 SHA-tagged images
-
+```
 Images:
 
 devsecops-user-service:<SHA>
@@ -492,6 +500,7 @@ The CD pipeline answers:
 
 The answer is:
 
+```text
 Deploy new release to INACTIVE environment
                 │
                 ▼
@@ -509,7 +518,7 @@ Deploy new release to INACTIVE environment
         │                │
         ▼                ▼
       DONE            ROLLBACK
-
+```
 🔵🟢 Blue-Green Environment Model
 
 There are two production environments:
