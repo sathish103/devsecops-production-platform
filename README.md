@@ -126,42 +126,20 @@ The current implementation uses blue-green deployment with a direct 100% traffic
                          │  devsecops-blue devsecops-green   │
                          └────────────────────────────────────┘
 
-🧩 Application Components
+## 🧩 Application Components
 
 The platform contains four application workloads:
 
-Component
-
-Container Image
-
-Production Port
-
-Frontend
-
-devsecops-frontend
-
-80
-
-User Service
-
-devsecops-user-service
-
-8081
-
-Product Service
-
-devsecops-product-service
-
-8082
-
-Order Service
-
-devsecops-order-service
-
-8083
+| Component | Container Image | Production Port |
+| --- | --- | --- |
+| Frontend | devsecops-frontend | 80 |
+| User Service | devsecops-user-service | 8081 |
+| Product Service | devsecops-product-service | 8082 |
+| Order Service | devsecops-order-service | 8083 |
 
 Each production workload exists in both environments:
 
+```text
 devsecops-blue
 ├── frontend-blue
 ├── user-service-blue
@@ -173,84 +151,30 @@ devsecops-green
 ├── user-service-green
 ├── product-service-green
 └── order-service-green
+```
 
-🔐 Technology Stack
+## 🔐 Technology Stack
 
-Layer
-
-Technology
-
-Source Control
-
-GitHub
-
-CI/CD
-
-GitHub Actions
-
-Cloud
-
-AWS
-
-Kubernetes
-
-Amazon EKS
-
-Container Runtime
-
-Docker
-
-Container Registry
-
-Amazon ECR
-
-AWS Authentication
-
-GitHub OIDC + IAM
-
-Build
-
-Maven
-
-Java
-
-Java 21
-
-Secret Detection
-
-Gitleaks
-
-Container Security
-
-Trivy
-
-Traffic Management
-
-Kubernetes Gateway API
-
-Gateway
-
-Kubernetes Gateway
-
-Routing
-
-Kubernetes HTTPRoute
-
-AWS Integration
-
-AWS Load Balancer Controller
-
-AWS Load Balancing
-
-Application Load Balancer
-
-Deployment Strategy
-
-Blue-Green
-
-Release Version
-
-Git Commit SHA
+| Layer | Technology |
+| --- | --- |
+| Source Control | GitHub |
+| CI/CD | GitHub Actions |
+| Cloud | AWS |
+| Kubernetes | Amazon EKS |
+| Container Runtime | Docker |
+| Container Registry | Amazon ECR |
+| AWS Authentication | GitHub OIDC + IAM |
+| Build | Maven |
+| Java | Java 21 |
+| Secret Detection | Gitleaks |
+| Container Security | Trivy |
+| Traffic Management | Kubernetes Gateway API |
+| Gateway | Kubernetes Gateway |
+| Routing | Kubernetes HTTPRoute |
+| AWS Integration | AWS Load Balancer Controller |
+| AWS Load Balancing | Application Load Balancer |
+| Deployment Strategy | Blue-Green |
+| Release Version | Git Commit SHA |
 
 🌿 Branch Strategy
 
@@ -288,7 +212,7 @@ CI branch      = main
 
 This prevents other workflow executions from accidentally deploying to production.
 
-🔄 CI — Continuous Integration
+**🔄 CI — Continuous Integration**
 
 CI Objective
 
@@ -319,10 +243,11 @@ AWS OIDC
     ▼
 Amazon ECR
 ```
-🧪 CI Stage 1 — Build & Test
+**🧪 CI Stage 1 — Build & Test**
 
 Three Java services are built using a matrix strategy:
 
+```text
 ┌─────────────────┐
 │  user-service   │
 └────────┬────────┘
@@ -334,6 +259,7 @@ Three Java services are built using a matrix strategy:
 ┌─────────────────┐
 │  order-service  │
 └─────────────────┘
+```
 
 Each service runs:
 
@@ -353,7 +279,7 @@ No security stage
 No Docker push
 No production deployment
 ```
-🔎 CI Stage 2 — Gitleaks
+**🔎 CI Stage 2 — Gitleaks**
 
 After successful tests, Gitleaks scans the repository for accidentally committed secrets.
 
@@ -372,7 +298,7 @@ STOP    Continue
 ```
 The objective is to prevent secrets such as credentials, tokens, or keys from progressing through the delivery pipeline.
 
-🐳 CI Stage 3 — Docker Build
+**🐳 CI Stage 3 — Docker Build**
 
 Four images are built:
 
@@ -406,7 +332,7 @@ Production
 ```
 There is no dependency on a mutable latest tag.
 
-🛡️ CI Stage 4 — Trivy
+**🛡️ CI Stage 4 — Trivy**
 
 Each Docker image is scanned using Trivy.
 
@@ -423,6 +349,7 @@ with:
 
 If the scan fails:
 
+```text
 Trivy FAIL
     │
     ▼
@@ -431,10 +358,11 @@ CI FAIL
     X
 No ECR push
 No CD
+```
 
 This creates a security gate before the image becomes a production artifact.
 
-🔑 CI Stage 5 — GitHub OIDC → AWS IAM
+**🔑 CI Stage 5 — GitHub OIDC → AWS IAM**
 
 GitHub Actions does not require long-lived AWS access keys.
 
@@ -460,7 +388,7 @@ GitHubActions-DevSecOps-Production
 
 This role provides the permissions required by the CI/CD workflows.
 
-📦 CI Stage 6 — Push to Amazon ECR
+**📦 CI Stage 6 — Push to Amazon ECR**
 
 After all previous stages succeed:
 
@@ -485,12 +413,14 @@ devsecops-frontend:<SHA>
 
 At this point CI is complete.
 
+```text
 CI SUCCESS
     │
     ▼
 CD automatically starts
+```
 
-🚀 CD — Continuous Deployment
+**🚀 CD — Continuous Deployment**
 
 CD Objective
 
@@ -519,10 +449,11 @@ Deploy new release to INACTIVE environment
         ▼                ▼
       DONE            ROLLBACK
 ```
-🔵🟢 Blue-Green Environment Model
+**🔵🟢 Blue-Green Environment Model**
 
 There are two production environments:
 
+```text
                  PRODUCTION
                      │
              ┌───────┴───────┐
@@ -530,6 +461,7 @@ There are two production environments:
              ▼               ▼
           BLUE             GREEN
      devsecops-blue    devsecops-green
+```
 
 Only one environment receives production traffic.
 
@@ -545,7 +477,7 @@ BLUE  = INACTIVE
 
 The CD workflow detects this automatically.
 
-🧭 CD Stage 1 — Detect Active Environment
+**🧭 CD Stage 1 — Detect Active Environment**
 
 The workflow first checks the production HTTPRoute state.
 
@@ -572,14 +504,16 @@ The workflow also verifies that all four routes agree.
 
 If one route points to BLUE while the others point to GREEN:
 
+```text
 Production state inconsistent
           │
           ▼
        CD STOPS
+```
 
 This protects against deploying from an unexpected routing state.
 
-🆕 CD Stage 2 — Deploy to Inactive Environment
+**🆕 CD Stage 2 — Deploy to Inactive Environment**
 
 Suppose:
 
@@ -605,6 +539,7 @@ Production traffic has not changed yet.
 
 The state is:
 
+```text
                  Production Traffic
                        │
                        ▼
@@ -614,8 +549,9 @@ The state is:
                     BLUE
                       0%
                   new release
+```
 
-⏳ CD Stage 3 — Kubernetes Rollout Validation
+**⏳ CD Stage 3 — Kubernetes Rollout Validation**
 
 The workflow waits for every candidate deployment:
 
@@ -635,7 +571,7 @@ Available replicas
 
 The candidate must be fully ready.
 
-🧾 CD Stage 4 — Image SHA Validation
+**🧾 CD Stage 4 — Image SHA Validation**
 
 The workflow checks the actual image configured in each deployment.
 
@@ -649,17 +585,20 @@ Kubernetes deployment image
 
 If they do not match:
 
+```text
 Candidate validation FAIL
         │
         ▼
 Production traffic remains unchanged
+```
 
 This prevents an unexpected image from becoming active.
 
-✅ Candidate Ready
+**✅ Candidate Ready**
 
 Only after all candidate checks pass:
 
+```text
 ┌────────────────────────────────────┐
 │       PRODUCTION CANDIDATE READY   │
 ├────────────────────────────────────┤
@@ -671,15 +610,17 @@ Only after all candidate checks pass:
 │ Production traffic: UNCHANGED      │
 │                                    │
 └────────────────────────────────────┘
+```
 
 Now the traffic switch can occur.
 
-🔀 CD Stage 5 — Where Does the Traffic Switch Actually Happen?
+**🔀 CD Stage 5 — Where Does the Traffic Switch Actually Happen?**
 
 This is the most important part of the architecture.
 
 The application traffic path is:
 
+```text
 User
   │
   ▼
@@ -711,6 +652,7 @@ Application Container
   │
   ▼
 Response
+```
 
 The deployment workflow does not directly modify Route 53 or manually move ALB target groups.
 
@@ -730,10 +672,12 @@ https://your-domain.example.com
 
 The request enters:
 
+```text
 User
   │
   ▼
 Internet
+```
 
 Step 2 — Route 53
 
@@ -741,6 +685,7 @@ Route 53 provides DNS resolution.
 
 Conceptually:
 
+```text
 your-domain.example.com
           │
           ▼
@@ -748,7 +693,7 @@ your-domain.example.com
           │
           ▼
 ALB DNS endpoint
-
+```
 Route 53's responsibility is DNS resolution.
 
 It does not perform the blue-green application deployment switch in this architecture.
@@ -757,10 +702,12 @@ It does not perform the blue-green application deployment switch in this archite
 
 The request reaches the AWS Application Load Balancer.
 
+```text
 Route 53
     │
     ▼
 AWS ALB
+```
 
 The ALB is the external load-balancing entry point.
 
@@ -770,6 +717,7 @@ The AWS Load Balancer Controller manages the AWS load-balancer configuration bas
 
 Inside the EKS cluster:
 
+```text
 Kubernetes Resources
         │
         ▼
@@ -777,7 +725,7 @@ AWS Load Balancer Controller
         │
         ▼
 AWS Load Balancer configuration
-
+```
 The controller watches Kubernetes networking resources and reconciles the corresponding AWS infrastructure.
 
 This creates the bridge between:
@@ -794,6 +742,7 @@ The Kubernetes Gateway represents the entry point for application traffic inside
 
 Conceptually:
 
+```text
 ALB
  │
  ▼
@@ -801,7 +750,7 @@ Gateway
  │
  ▼
 HTTPRoute
-
+```
 The Gateway defines the listener/entry point.
 
 The HTTPRoute defines how application requests are routed.
@@ -812,60 +761,70 @@ This is where the blue-green application traffic decision is expressed.
 
 Example:
 
+```yaml
 backendRefs:
   - name: frontend-blue
     namespace: devsecops-blue
     port: 80
     weight: 100
+```
 
 This means the route sends:
 
+```text
 frontend traffic
        │
        ▼
 frontend-blue
        │
       100%
+```
 
 After the blue-green switch:
 
+```yaml
 backendRefs:
   - name: frontend-green
     namespace: devsecops-green
     port: 80
     weight: 100
+```
 
 Now:
 
+```text
 frontend traffic
        │
        ▼
 frontend-green
        │
       100%
-
+```
 🎯 The Exact Traffic Switch Point
 
 The logical application traffic switch in this implementation happens at the Kubernetes HTTPRoute backend reference.
 
 Before:
 
+```text
 HTTPRoute
    │
    ▼
 frontend-blue
    │
  100%
+```
 
 After:
 
+```text
 HTTPRoute
    │
    ▼
 frontend-green
    │
  100%
-
+```
 The CD workflow performs this by patching the HTTPRoute.
 
 For all four application routes:
@@ -909,6 +868,7 @@ Then the networking controller reconciles the desired Kubernetes state into the 
 
 Conceptually:
 
+```text
 GitHub Actions
       │
       │ kubectl patch HTTPRoute
@@ -926,7 +886,7 @@ AWS ALB configuration
       │
       ▼
 Target Groups / routing
-
+```
 The exact AWS target-group structure depends on the Gateway implementation and controller configuration. Therefore, the safe architectural statement is:
 
 HTTPRoute is the Kubernetes-level routing control; AWS Load Balancer Controller translates/reconciles the Kubernetes networking state into the AWS load-balancer configuration, including the required backend target configuration.
@@ -937,6 +897,7 @@ At the backend, Kubernetes provides the service abstraction.
 
 Conceptually:
 
+```text
 HTTPRoute
     │
     ▼
@@ -947,11 +908,13 @@ Service endpoints
     │
     ▼
 Pod IPs
+```
 
 With AWS load balancing, the AWS load balancer can use pod IPs as targets when configured with the appropriate target type.
 
 The conceptual relationship is:
 
+```text
 Kubernetes Service
        │
        ▼
@@ -965,15 +928,17 @@ AWS Target Group
        │
        ▼
 ALB
+```
 
 For example:
 
+```text
 frontend-green Service
         │
         ├── Pod IP 10.x.x.21
         ├── Pod IP 10.x.x.22
         └── Pod IP 10.x.x.23
-
+```
 The target registration/reconciliation is handled by Kubernetes/AWS integration components rather than by the GitHub Actions deployment script itself.
 
 🔄 Full Request-to-Response Flow
@@ -1045,8 +1010,9 @@ The complete production request path can be visualized as:
 
 Suppose the current production environment is GREEN.
 
-Before deployment
+Before deployment:
 
+```text
                      HTTPRoute
                          │
                          ▼
@@ -1056,17 +1022,21 @@ Before deployment
                          │
                          ▼
                     GREEN Pods
+```
 
 BLUE is running separately but receives no production traffic.
 
+```text
 BLUE Pods
    │
    └── 0% production traffic
+```
 
-During deployment
+During deployment:
 
 The new release is deployed to BLUE.
 
+```text
                     PRODUCTION
                         │
                         ▼
@@ -1082,37 +1052,41 @@ The new release is deployed to BLUE.
                        │ new version
                        ▼
                   BLUE Pods
+```
 
 Production traffic remains on GREEN.
 
-After candidate validation
+After candidate validation:
 
 CD patches the HTTPRoutes.
 
+```text
 BEFORE:
 
 HTTPRoute
    │
    └── GREEN = 100%
 
-
 AFTER:
 
 HTTPRoute
    │
    └── BLUE = 100%
+```
 
 Now:
 
+```text
 GREEN = 0%
 BLUE  = 100%
-
+```
 🚨 Automatic Rollback
 
 The deployment contains a rollback path for failed final production verification.
 
 Example:
 
+```text
 Before:
 
 GREEN = 100%
@@ -1140,9 +1114,11 @@ HTTPRoutes restored
   ▼
 GREEN = 100%
 BLUE  = 0%
+```
 
 🧯 Rollback Flow
 
+```text
                  100% SWITCH
                       │
                       ▼
@@ -1167,7 +1143,7 @@ BLUE  = 0%
                               │
                               ▼
                          Production
-
+```
 The previous environment remains available because blue and green are maintained separately.
 
 🔐 Why Keep the Old Environment Running?
@@ -1176,12 +1152,15 @@ The inactive environment is not immediately destroyed after a release.
 
 This is important because:
 
+```text
 OLD ENVIRONMENT
        │
        └── remains available
+```
 
 If the new environment has a problem:
 
+```text
 Production
     │
     ▼
@@ -1192,7 +1171,7 @@ New environment
     ▼
 Old environment
    100%
-
+```
 This allows a fast traffic rollback without rebuilding the old release.
 
 🔒 Production Safety Controls
@@ -1201,10 +1180,12 @@ The CD workflow includes several safeguards.
 
 1. CI must succeed
 
+```text
 CI FAIL
   │
   X
 No production deployment
+```
 
 2. Main push only
 
@@ -1214,8 +1195,10 @@ CD only continues for a successful CI run caused by a push to main.
 
 The workflow determines:
 
+```text
 ACTIVE
 INACTIVE
+```
 
 before deploying.
 
@@ -1235,15 +1218,19 @@ The candidate must use the exact image generated by CI.
 
 After the switch:
 
+```text
 Expected environment = new environment
 Expected traffic      = 100%
+```
 
 8. Production verification
 
 The active deployments must:
 
+```text
 run expected image
 have expected replicas ready
+```
 
 9. Automatic rollback
 
@@ -1253,16 +1240,18 @@ If final verification fails after the switch, the previous environment is restor
 
 The workflow uses:
 
+```yaml
 concurrency:
   group: production-blue-green
   cancel-in-progress: false
-
+```
 This prevents multiple production blue-green workflows from modifying production traffic state simultaneously.
 
 📊 Current Traffic Model
 
 The current project uses:
 
+```text
                  BLUE-GREEN
                      │
           ┌──────────┴──────────┐
@@ -1270,9 +1259,11 @@ The current project uses:
        ACTIVE                INACTIVE
           │                     │
         100%                    0%
+```
 
 After deployment:
 
+```text
                  BLUE-GREEN
                      │
           ┌──────────┴──────────┐
@@ -1280,7 +1271,7 @@ After deployment:
        OLD ENV              NEW ENV
           │                     │
          0%                    100%
-
+```
 This is not a gradual canary strategy.
 
 There is no:
@@ -1318,17 +1309,20 @@ The architecture can be extended to weighted/canary traffic later, but the curre
 
 The production namespace contains the HTTPRoutes:
 
+```text
 devsecops
 │
 ├── frontend-route
 ├── user-route
 ├── product-route
 └── order-route
+```
 
 They point to services in the blue or green namespaces.
 
 Example:
 
+```text
 frontend-route
       │
       ▼
@@ -1339,7 +1333,7 @@ devsecops-green
       │
       ▼
 GREEN frontend pods
-
+```
 The same model applies to:
 
 user-service
@@ -1350,6 +1344,7 @@ order-service
 
 Every release can be traced through the complete chain:
 
+```text
 Git Commit SHA
       │
       ▼
@@ -1372,9 +1367,11 @@ HTTPRoute
       │
       ▼
 Production
+```
 
 For example:
 
+```text
 commit abc123
      │
      ├── user-service:abc123
@@ -1387,11 +1384,12 @@ commit abc123
               │
               ▼
        EKS BLUE/GREEN
-
+```
 This makes production releases auditable and reproducible.
 
-🔐 Security Architecture
+## 🔐 Security Architecture
 
+```text
 Developer
     │
     ▼
@@ -1417,11 +1415,12 @@ Amazon ECR
     │
     ▼
 Amazon EKS
-
+```
 Security is integrated directly into the CI pipeline instead of being treated as a separate post-deployment activity.
 
-☁️ AWS Architecture
+## ☁️ AWS Architecture
 
+```text
 AWS
 │
 ├── ap-south-1
@@ -1454,7 +1453,7 @@ AWS
 │           └── order-service
 │
 └── Application Load Balancer
-
+```
 ## 📁 Repository Structure
 
 ```text
@@ -1503,32 +1502,37 @@ Responsibilities:
 
 Responsibilities:
 
-✓ Wait for successful CI
-✓ Confirm main branch push
-✓ Detect active environment
-✓ Identify inactive environment
-✓ Deploy release to inactive environment
-✓ Wait for rollout
-✓ Validate replicas
-✓ Validate image SHA
-✓ Switch HTTPRoutes to new environment
-✓ Set production traffic to 100%
-✓ Verify production
-✓ Roll back to previous environment when final verification fails
+- ✓ Wait for successful CI
+- ✓ Confirm main branch push
+- ✓ Detect active environment
+- ✓ Identify inactive environment
+- ✓ Deploy release to inactive environment
+- ✓ Wait for rollout
+- ✓ Validate replicas
+- ✓ Validate image SHA
+- ✓ Switch HTTPRoutes to new environment
+- ✓ Set production traffic to 100%
+- ✓ Verify production
+- ✓ Roll back to previous environment when final verification fails
 
-🔬 End-to-End Deployment Example
+## 🔬 End-to-End Deployment Example
 
 Assume the current state is:
 
+```text
 GREEN = ACTIVE
 BLUE  = INACTIVE
+```
 
 A developer runs:
 
+```bash
 git push origin main
+```
 
-CI
+### CI
 
+```text
 main
  │
  ▼
@@ -1551,9 +1555,11 @@ ECR Push
  │
  ▼
 CI SUCCESS
+```
 
-CD
+### CD
 
+```text
 Detect:
 
 ACTIVE   = GREEN
@@ -1594,25 +1600,33 @@ HTTPRoutes → BLUE
 Traffic → 100%
 
 Release complete.
+```
 
-🔁 Next Deployment
+## 🔁 Next Deployment
 
 On the next release:
 
+```text
 BLUE  = ACTIVE
 GREEN = INACTIVE
+```
 
 The new release is deployed to GREEN:
 
+```text
 new SHA → GREEN
+```
 
 After validation:
 
+```text
 BLUE  = 0%
 GREEN = 100%
+```
 
 Therefore the deployment cycle continuously alternates:
 
+```text
 Release 1
 GREEN → BLUE
 
@@ -1624,11 +1638,12 @@ GREEN → BLUE
 
 Release 4
 BLUE → GREEN
-
-🏁 Final Architecture Summary
+```
+## 🏁 Final Architecture Summary
 
 The complete production delivery chain is:
 
+```text
                          SOURCE
                            │
                            ▼
@@ -1692,9 +1707,11 @@ The complete production delivery chain is:
                                            │
                                            ▼
                                       RESPONSE
+```
 
-🎯 Core Principle
+## 🎯 Core Principle
 
+```text
 ┌──────────────────────────────────────────────────────────┐
 │                                                          │
 │   BUILD → TEST → SCAN → PACKAGE → DEPLOY → VALIDATE     │
@@ -1712,34 +1729,26 @@ The complete production delivery chain is:
 │             FAILURE → AUTOMATIC ROLLBACK                 │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
+```
 
 This project demonstrates a complete DevSecOps production workflow where security, immutable artifacts, Kubernetes deployment validation, blue-green environments, controlled traffic switching, production verification, and rollback are integrated into a single automated delivery process.
 
-👨‍💻 Project Focus
+## 👨‍💻 Project Focus
 
 The platform demonstrates practical implementation of:
 
-DevSecOps CI/CD
-
-GitHub Actions
-
-AWS EKS
-
-Amazon ECR
-
-GitHub OIDC
-
-Docker
-
-Maven / Java 21
-
-Gitleaks
-
-Trivy
-
-Kubernetes Gateway API
-
-Gateway / HTTPRoute
+- DevSecOps CI/CD
+- GitHub Actions
+- AWS EKS
+- Amazon ECR
+- GitHub OIDC
+- Docker
+- Maven / Java 21
+- Gitleaks
+- Trivy
+- Kubernetes Gateway API
+- Gateway / HTTPRoute
+- AWS Load Balancer Controller
 
 AWS Load Balancer Controller
 
