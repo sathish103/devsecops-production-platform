@@ -1,6 +1,6 @@
-# This is just for understanding the workflow, it is not used in production. The workflow is only for canary deployment.
+# This is just for understanding the workflow, it is not used in prodcution. This is a blue-green deployment with canary release strategy. 
 
-name: DevSecOps Canary Production Deployment
+name: DevSecOps Blue-Green Canary Production Deployment
 
 on:
   workflow_run:
@@ -14,7 +14,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: production-canary
+  group: production-blue-green-canary
   cancel-in-progress: false
 
 env:
@@ -29,15 +29,18 @@ env:
 
   PRODUCTION_NAMESPACE: devsecops
 
+  # Canary traffic progression
+  CANARY_STAGES: "10 25 50 75 100"
+
 
 jobs:
 
   # ============================================================
-  # 1. PREPARE CANARY
+  # 1. PREPARE PRODUCTION CANDIDATE
   # ============================================================
 
   prepare:
-    name: Prepare Canary
+    name: Prepare Production Candidate
     runs-on: ubuntu-latest
 
     if: >
@@ -47,6 +50,8 @@ jobs:
 
     outputs:
       version: ${{ steps.release.outputs.version }}
+      active_env: ${{ steps.environment.outputs.active_env }}
+      inactive_env: ${{ steps.environment.outputs.inactive_env }}
 
     steps:
 
@@ -103,37 +108,113 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           echo "========================================="
-          echo "CANARY VERSION"
+          echo "RELEASE VERSION"
           echo "========================================="
           echo "$VERSION"
 
       # ----------------------------------------------------------
-      # DEPLOY CANARY VERSION
+      # DETECT BLUE / GREEN STATE
       # ----------------------------------------------------------
 
-      - name: Deploy canary version
-        env:
-          VERSION: ${{ steps.release.outputs.version }}
+      - name: Detect active environment
+        id: environment
         run: |
           set -e
 
           echo "========================================="
-          echo "DEPLOYING CANARY"
+          echo "DETECTING PRODUCTION STATE"
           echo "========================================="
-          echo "Version: $VERSION"
+
+          FRONTEND_BACKEND=$(kubectl get httproute frontend-route \
+            -n "$PRODUCTION_NAMESPACE" \
+            -o jsonpath='{.spec.rules[0].backendRefs[0].name}')
+
+          echo "frontend-route -> $FRONTEND_BACKEND"
+
+          if [[ "$FRONTEND_BACKEND" == "frontend-blue" ]]; then
+            ACTIVE_ENV="blue"
+            INACTIVE_ENV="green"
+
+          elif [[ "$FRONTEND_BACKEND" == "frontend-green" ]]; then
+            ACTIVE_ENV="green"
+            INACTIVE_ENV="blue"
+
+          else
+            echo "ERROR: Cannot determine active environment."
+            echo "Unexpected backend: $FRONTEND_BACKEND"
+            exit 1
+          fi
+
+          echo
+          echo "Validating all production routes..."
+
+          declare -A EXPECTED_SERVICES
+
+          EXPECTED_SERVICES[frontend-route]="frontend-$ACTIVE_ENV"
+          EXPECTED_SERVICES[user-route]="user-service-$ACTIVE_ENV"
+          EXPECTED_SERVICES[product-route]="product-service-$ACTIVE_ENV"
+          EXPECTED_SERVICES[order-route]="order-service-$ACTIVE_ENV"
+
+          for ROUTE in \
+            frontend-route \
+            user-route \
+            product-route \
+            order-route
+          do
+
+            BACKEND=$(kubectl get httproute "$ROUTE" \
+              -n "$PRODUCTION_NAMESPACE" \
+              -o jsonpath='{.spec.rules[0].backendRefs[0].name}')
+
+            EXPECTED="${EXPECTED_SERVICES[$ROUTE]}"
+
+            echo "$ROUTE -> $BACKEND"
+
+            if [[ "$BACKEND" != "$EXPECTED" ]]; then
+              echo "ERROR: Production routes are inconsistent."
+              exit 1
+            fi
+          done
+
+          echo
+          echo "ACTIVE   : $ACTIVE_ENV"
+          echo "INACTIVE : $INACTIVE_ENV"
+
+          echo "active_env=$ACTIVE_ENV" >> "$GITHUB_OUTPUT"
+          echo "inactive_env=$INACTIVE_ENV" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------------------------------------
+      # DEPLOY CANDIDATE TO INACTIVE ENVIRONMENT
+      # ----------------------------------------------------------
+
+      - name: Deploy candidate to inactive environment
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          TARGET_ENV: ${{ steps.environment.outputs.inactive_env }}
+        run: |
+          set -e
+
+          NAMESPACE="devsecops-$TARGET_ENV"
 
           declare -A DEPLOYMENTS
           declare -A IMAGES
 
-          DEPLOYMENTS[frontend]="frontend-canary"
-          DEPLOYMENTS[user-service]="user-service-canary"
-          DEPLOYMENTS[product-service]="product-service-canary"
-          DEPLOYMENTS[order-service]="order-service-canary"
+          DEPLOYMENTS[frontend]="frontend-$TARGET_ENV"
+          DEPLOYMENTS[user-service]="user-service-$TARGET_ENV"
+          DEPLOYMENTS[product-service]="product-service-$TARGET_ENV"
+          DEPLOYMENTS[order-service]="order-service-$TARGET_ENV"
 
           IMAGES[frontend]="$ECR_REGISTRY/$FRONTEND_IMAGE:$VERSION"
           IMAGES[user-service]="$ECR_REGISTRY/$USER_IMAGE:$VERSION"
           IMAGES[product-service]="$ECR_REGISTRY/$PRODUCT_IMAGE:$VERSION"
           IMAGES[order-service]="$ECR_REGISTRY/$ORDER_IMAGE:$VERSION"
+
+          echo "========================================="
+          echo "DEPLOYING CANARY CANDIDATE"
+          echo "========================================="
+          echo "Environment : $TARGET_ENV"
+          echo "Namespace   : $NAMESPACE"
+          echo "Version     : $VERSION"
 
           for SERVICE in \
             frontend \
@@ -149,7 +230,7 @@ jobs:
             echo "Deployment : $DEPLOYMENT"
             echo "Image      : $IMAGE"
 
-            kubectl -n "$PRODUCTION_NAMESPACE" \
+            kubectl -n "$NAMESPACE" \
               set image deployment/"$DEPLOYMENT" \
               "$SERVICE"="$IMAGE"
           done
@@ -158,66 +239,71 @@ jobs:
       # WAIT FOR ROLLOUT
       # ----------------------------------------------------------
 
-      - name: Wait for canary rollout
+      - name: Wait for candidate rollout
+        env:
+          TARGET_ENV: ${{ steps.environment.outputs.inactive_env }}
         run: |
           set -e
 
+          NAMESPACE="devsecops-$TARGET_ENV"
+
           for DEPLOYMENT in \
-            frontend-canary \
-            user-service-canary \
-            product-service-canary \
-            order-service-canary
+            frontend-$TARGET_ENV \
+            user-service-$TARGET_ENV \
+            product-service-$TARGET_ENV \
+            order-service-$TARGET_ENV
           do
 
             echo "Waiting for $DEPLOYMENT..."
 
             kubectl rollout status \
               deployment/"$DEPLOYMENT" \
-              -n "$PRODUCTION_NAMESPACE" \
+              -n "$NAMESPACE" \
               --timeout=5m
           done
 
       # ----------------------------------------------------------
-      # VERIFY CANARY
+      # VERIFY CANDIDATE
       # ----------------------------------------------------------
 
-      - name: Verify canary deployments
+      - name: Verify candidate deployments
         env:
+          TARGET_ENV: ${{ steps.environment.outputs.inactive_env }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -e
 
+          NAMESPACE="devsecops-$TARGET_ENV"
+
           for DEPLOYMENT in \
-            frontend-canary \
-            user-service-canary \
-            product-service-canary \
-            order-service-canary
+            frontend-$TARGET_ENV \
+            user-service-$TARGET_ENV \
+            product-service-$TARGET_ENV \
+            order-service-$TARGET_ENV
           do
 
             READY=$(kubectl get deployment "$DEPLOYMENT" \
-              -n "$PRODUCTION_NAMESPACE" \
+              -n "$NAMESPACE" \
               -o jsonpath='{.status.readyReplicas}')
 
-            DESIRED=$(kubectl get deployment "$DEPLOYMENT" \
-              -n "$PRODUCTION_NAMESPACE" \
-              -o jsonpath='{.spec.replicas}')
-
-            UPDATED=$(kubectl get deployment "$DEPLOYMENT" \
-              -n "$PRODUCTION_NAMESPACE" \
-              -o jsonpath='{.status.updatedReplicas}')
-
             AVAILABLE=$(kubectl get deployment "$DEPLOYMENT" \
-              -n "$PRODUCTION_NAMESPACE" \
+              -n "$NAMESPACE" \
               -o jsonpath='{.status.availableReplicas}')
 
+            UPDATED=$(kubectl get deployment "$DEPLOYMENT" \
+              -n "$NAMESPACE" \
+              -o jsonpath='{.status.updatedReplicas}')
+
+            DESIRED=$(kubectl get deployment "$DEPLOYMENT" \
+              -n "$NAMESPACE" \
+              -o jsonpath='{.spec.replicas}')
+
             IMAGE=$(kubectl get deployment "$DEPLOYMENT" \
-              -n "$PRODUCTION_NAMESPACE" \
+              -n "$NAMESPACE" \
               -o jsonpath='{.spec.template.spec.containers[0].image}')
 
             echo
-            echo "-----------------------------------------"
             echo "$DEPLOYMENT"
-            echo "-----------------------------------------"
             echo "Desired   : $DESIRED"
             echo "Updated   : ${UPDATED:-0}"
             echo "Ready     : ${READY:-0}"
@@ -225,34 +311,34 @@ jobs:
             echo "Image     : $IMAGE"
 
             if [[ "${READY:-0}" != "$DESIRED" ]]; then
-              echo "ERROR: Canary is not ready."
+              echo "ERROR: Deployment not ready."
               exit 1
             fi
 
             if [[ "${AVAILABLE:-0}" != "$DESIRED" ]]; then
-              echo "ERROR: Canary is not available."
+              echo "ERROR: Deployment not available."
               exit 1
             fi
 
             if [[ "${UPDATED:-0}" != "$DESIRED" ]]; then
-              echo "ERROR: Canary is not updated."
+              echo "ERROR: Deployment not updated."
               exit 1
             fi
 
             if [[ "$IMAGE" != *":$VERSION" ]]; then
-              echo "ERROR: Canary has wrong image version."
+              echo "ERROR: Wrong image version."
               exit 1
             fi
           done
 
           echo
           echo "========================================="
-          echo "CANARY READY"
+          echo "CANARY CANDIDATE READY"
           echo "========================================="
 
 
   # ============================================================
-  # 2. GRADUAL CANARY TRAFFIC
+  # 2. CANARY TRAFFIC
   # ============================================================
 
   canary:
@@ -285,43 +371,22 @@ jobs:
             --name "$EKS_CLUSTER"
 
       # ----------------------------------------------------------
-      # SHOW CURRENT TRAFFIC
-      # ----------------------------------------------------------
-
-      - name: Show current production traffic
-        run: |
-          set -e
-
-          echo "========================================="
-          echo "CURRENT PRODUCTION TRAFFIC"
-          echo "========================================="
-
-          for ROUTE in \
-            frontend-route \
-            user-route \
-            product-route \
-            order-route
-          do
-
-            echo
-            echo "----- $ROUTE -----"
-
-            kubectl get httproute "$ROUTE" \
-              -n "$PRODUCTION_NAMESPACE" \
-              -o jsonpath='{range .spec.rules[0].backendRefs[*]}{.name}{" = "}{.weight}{"%"}{"\n"}{end}'
-          done
-
-      # ----------------------------------------------------------
-      # PROGRESSIVE CANARY
+      # PROGRESSIVE TRAFFIC
       # ----------------------------------------------------------
 
       - name: Gradually increase canary traffic
+        env:
+          ACTIVE_ENV: ${{ needs.prepare.outputs.active_env }}
+          INACTIVE_ENV: ${{ needs.prepare.outputs.inactive_env }}
         run: |
           set -e
 
           echo "========================================="
-          echo "PROGRESSIVE CANARY DEPLOYMENT"
+          echo "BLUE-GREEN CANARY DEPLOYMENT"
           echo "========================================="
+          echo "STABLE : $ACTIVE_ENV"
+          echo "CANARY : $INACTIVE_ENV"
+          echo
 
           for CANARY_WEIGHT in 10 25 50 75 100
           do
@@ -330,13 +395,9 @@ jobs:
 
             echo
             echo "============================================================"
-            echo "CANARY : ${CANARY_WEIGHT}%"
-            echo "STABLE : ${STABLE_WEIGHT}%"
+            echo "CANARY TRAFFIC: ${CANARY_WEIGHT}%"
+            echo "STABLE TRAFFIC: ${STABLE_WEIGHT}%"
             echo "============================================================"
-
-            # ----------------------------------------------------
-            # FRONTEND
-            # ----------------------------------------------------
 
             kubectl patch httproute frontend-route \
               -n "$PRODUCTION_NAMESPACE" \
@@ -349,26 +410,22 @@ jobs:
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"frontend\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"frontend-$ACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$ACTIVE_ENV\",
                       \"port\": 80,
                       \"weight\": $STABLE_WEIGHT
                     },
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"frontend-canary\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"frontend-$INACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$INACTIVE_ENV\",
                       \"port\": 80,
                       \"weight\": $CANARY_WEIGHT
                     }
                   ]
                 }
               ]"
-
-            # ----------------------------------------------------
-            # USER
-            # ----------------------------------------------------
 
             kubectl patch httproute user-route \
               -n "$PRODUCTION_NAMESPACE" \
@@ -381,26 +438,22 @@ jobs:
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"user-service\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"user-service-$ACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$ACTIVE_ENV\",
                       \"port\": 8081,
                       \"weight\": $STABLE_WEIGHT
                     },
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"user-service-canary\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"user-service-$INACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$INACTIVE_ENV\",
                       \"port\": 8081,
                       \"weight\": $CANARY_WEIGHT
                     }
                   ]
                 }
               ]"
-
-            # ----------------------------------------------------
-            # PRODUCT
-            # ----------------------------------------------------
 
             kubectl patch httproute product-route \
               -n "$PRODUCTION_NAMESPACE" \
@@ -413,26 +466,22 @@ jobs:
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"product-service\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"product-service-$ACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$ACTIVE_ENV\",
                       \"port\": 8082,
                       \"weight\": $STABLE_WEIGHT
                     },
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"product-service-canary\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"product-service-$INACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$INACTIVE_ENV\",
                       \"port\": 8082,
                       \"weight\": $CANARY_WEIGHT
                     }
                   ]
                 }
               ]"
-
-            # ----------------------------------------------------
-            # ORDER
-            # ----------------------------------------------------
 
             kubectl patch httproute order-route \
               -n "$PRODUCTION_NAMESPACE" \
@@ -445,16 +494,16 @@ jobs:
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"order-service\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"order-service-$ACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$ACTIVE_ENV\",
                       \"port\": 8083,
                       \"weight\": $STABLE_WEIGHT
                     },
                     {
                       \"group\": \"\",
                       \"kind\": \"Service\",
-                      \"name\": \"order-service-canary\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"name\": \"order-service-$INACTIVE_ENV\",
+                      \"namespace\": \"devsecops-$INACTIVE_ENV\",
                       \"port\": 8083,
                       \"weight\": $CANARY_WEIGHT
                     }
@@ -462,12 +511,14 @@ jobs:
                 }
               ]"
 
-            # ----------------------------------------------------
-            # SHOW TRAFFIC
-            # ----------------------------------------------------
-
             echo
-            echo "Current traffic:"
+            echo "Traffic switched to:"
+            echo "  Stable : ${STABLE_WEIGHT}%"
+            echo "  Canary : ${CANARY_WEIGHT}%"
+
+            # ----------------------------------------------------
+            # VERIFY ROUTES
+            # ----------------------------------------------------
 
             for ROUTE in \
               frontend-route \
@@ -485,73 +536,54 @@ jobs:
             done
 
             # ----------------------------------------------------
-            # WAIT BETWEEN STAGES
+            # VERIFY EXPECTED WEIGHTS
+            # ----------------------------------------------------
+
+            for ROUTE in \
+              frontend-route \
+              user-route \
+              product-route \
+              order-route
+            do
+
+              CANARY_ACTUAL=$(kubectl get httproute "$ROUTE" \
+                -n "$PRODUCTION_NAMESPACE" \
+                -o jsonpath="{.spec.rules[0].backendRefs[?(@.name=='$(case "$ROUTE" in frontend-route) echo frontend-$INACTIVE_ENV;; user-route) echo user-service-$INACTIVE_ENV;; product-route) echo product-service-$INACTIVE_ENV;; order-route) echo order-service-$INACTIVE_ENV;; esac)')].weight")
+
+              if [[ "$CANARY_ACTUAL" != "$CANARY_WEIGHT" ]]; then
+                echo "ERROR: $ROUTE canary weight is $CANARY_ACTUAL instead of $CANARY_WEIGHT."
+                exit 1
+              fi
+
+            done
+
+            # ----------------------------------------------------
+            # HOLD EACH CANARY STAGE
             # ----------------------------------------------------
 
             if [[ "$CANARY_WEIGHT" != "100" ]]; then
-
               echo
               echo "Canary stage ${CANARY_WEIGHT}% active."
               echo "Waiting 60 seconds before next stage..."
-
               sleep 60
             fi
 
           done
 
           echo
-          echo "========================================="
+          echo "============================================================"
           echo "CANARY REACHED 100%"
-          echo "========================================="
-
-
-  # ============================================================
-  # 3. FINAL VERIFICATION
-  # ============================================================
-
-  verify:
-    name: Verify Canary Production
-    needs: [prepare, canary]
-    runs-on: ubuntu-latest
-
-    steps:
+          echo "============================================================"
 
       # ----------------------------------------------------------
-      # AWS
+      # FINAL TRAFFIC VERIFICATION
       # ----------------------------------------------------------
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::124666675720:role/GitHubActions-DevSecOps-Production
-          aws-region: ${{ env.AWS_REGION }}
-
-      # ----------------------------------------------------------
-      # EKS
-      # ----------------------------------------------------------
-
-      - name: Configure kubectl
+      - name: Verify final production traffic
+        env:
+          EXPECTED_ENV: ${{ needs.prepare.outputs.inactive_env }}
         run: |
           set -e
-
-          aws eks update-kubeconfig \
-            --region "$AWS_REGION" \
-            --name "$EKS_CLUSTER"
-
-      # ----------------------------------------------------------
-      # VERIFY 100% CANARY
-      # ----------------------------------------------------------
-
-      - name: Verify 100 percent canary traffic
-        run: |
-          set -e
-
-          declare -A EXPECTED_SERVICES
-
-          EXPECTED_SERVICES[frontend-route]="frontend-canary"
-          EXPECTED_SERVICES[user-route]="user-service-canary"
-          EXPECTED_SERVICES[product-route]="product-service-canary"
-          EXPECTED_SERVICES[order-route]="order-service-canary"
 
           for ROUTE in \
             frontend-route \
@@ -568,41 +600,38 @@ jobs:
               -n "$PRODUCTION_NAMESPACE" \
               -o jsonpath='{.spec.rules[0].backendRefs[0].weight}')
 
-            EXPECTED="${EXPECTED_SERVICES[$ROUTE]}"
-
             echo "$ROUTE -> $BACKEND = $WEIGHT%"
 
-            if [[ "$BACKEND" != "$EXPECTED" ]]; then
-              echo "ERROR: Wrong production backend."
+            if [[ "$BACKEND" != *"-$EXPECTED_ENV" ]]; then
+              echo "ERROR: Wrong final backend."
               exit 1
             fi
 
             if [[ "$WEIGHT" != "100" ]]; then
-              echo "ERROR: Canary is not receiving 100%."
+              echo "ERROR: Final traffic is not 100%."
               exit 1
             fi
           done
 
           echo
           echo "========================================="
-          echo "CANARY DEPLOYMENT COMPLETE"
+          echo "BLUE-GREEN CANARY DEPLOYMENT COMPLETE"
           echo "========================================="
 
 
   # ============================================================
-  # 4. AUTOMATIC ROLLBACK
+  # 3. ROLLBACK
   # ============================================================
 
   rollback:
-    name: Rollback Canary
-    needs: [prepare, canary, verify]
+    name: Rollback Canary Traffic
+    needs: [prepare, canary]
     runs-on: ubuntu-latest
 
     if: >
       always() &&
       needs.prepare.result == 'success' &&
-      needs.canary.result == 'success' &&
-      needs.verify.result == 'failure'
+      needs.canary.result == 'failure'
 
     steps:
 
@@ -629,24 +658,27 @@ jobs:
             --name "$EKS_CLUSTER"
 
       # ----------------------------------------------------------
-      # RESTORE STABLE
+      # RESTORE STABLE ENVIRONMENT
       # ----------------------------------------------------------
 
-      - name: Restore stable production
+      - name: Restore stable production traffic
+        env:
+          ACTIVE_ENV: ${{ needs.prepare.outputs.active_env }}
         run: |
           set -e
 
           echo "========================================="
           echo "ROLLING BACK CANARY"
           echo "========================================="
+          echo "RESTORING: $ACTIVE_ENV"
 
           declare -A SERVICES
           declare -A PORTS
 
-          SERVICES[frontend-route]="frontend"
-          SERVICES[user-route]="user-service"
-          SERVICES[product-route]="product-service"
-          SERVICES[order-route]="order-service"
+          SERVICES[frontend-route]="frontend-$ACTIVE_ENV"
+          SERVICES[user-route]="user-service-$ACTIVE_ENV"
+          SERVICES[product-route]="product-service-$ACTIVE_ENV"
+          SERVICES[order-route]="order-service-$ACTIVE_ENV"
 
           PORTS[frontend-route]=80
           PORTS[user-route]=8081
@@ -678,7 +710,7 @@ jobs:
                       \"group\": \"\",
                       \"kind\": \"Service\",
                       \"name\": \"$SERVICE\",
-                      \"namespace\": \"$PRODUCTION_NAMESPACE\",
+                      \"namespace\": \"devsecops-$ACTIVE_ENV\",
                       \"port\": $PORT,
                       \"weight\": 100
                     }
@@ -692,15 +724,10 @@ jobs:
       # ----------------------------------------------------------
 
       - name: Verify rollback
+        env:
+          EXPECTED_ENV: ${{ needs.prepare.outputs.active_env }}
         run: |
           set -e
-
-          declare -A EXPECTED_SERVICES
-
-          EXPECTED_SERVICES[frontend-route]="frontend"
-          EXPECTED_SERVICES[user-route]="user-service"
-          EXPECTED_SERVICES[product-route]="product-service"
-          EXPECTED_SERVICES[order-route]="order-service"
 
           for ROUTE in \
             frontend-route \
@@ -717,17 +744,15 @@ jobs:
               -n "$PRODUCTION_NAMESPACE" \
               -o jsonpath='{.spec.rules[0].backendRefs[0].weight}')
 
-            EXPECTED="${EXPECTED_SERVICES[$ROUTE]}"
-
             echo "$ROUTE -> $BACKEND = $WEIGHT%"
 
-            if [[ "$BACKEND" != "$EXPECTED" ]]; then
+            if [[ "$BACKEND" != *"-$EXPECTED_ENV" ]]; then
               echo "ERROR: Rollback failed."
               exit 1
             fi
 
             if [[ "$WEIGHT" != "100" ]]; then
-              echo "ERROR: Rollback is not 100%."
+              echo "ERROR: Rollback weight is not 100%."
               exit 1
             fi
           done
@@ -736,3 +761,4 @@ jobs:
           echo "========================================="
           echo "ROLLBACK COMPLETE"
           echo "========================================="
+          echo "Production restored to: $EXPECTED_ENV"
